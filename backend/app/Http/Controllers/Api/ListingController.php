@@ -15,7 +15,7 @@ class ListingController extends Controller
     {
         return [
             'id' => $l->id, 'name' => $l->name, 'price' => $l->price, 'availability' => $l->availabilityLabel(),
-            'status' => $l->status, 'battery' => $l->battery,
+            'status' => $l->status, 'battery' => $l->battery, 'type' => $l->type, 'location' => $l->location,
             'available_from' => $l->available_from?->toDateString(), 'available_to' => $l->available_to?->toDateString(),
         ];
     }
@@ -24,6 +24,8 @@ class ListingController extends Controller
     {
         return $r->validate([
             'name' => ['required', 'string', 'max:100'],
+            'type' => ['required', 'in:Hotel,Airbnb,Motel,Pension house,Resort'],
+            'location' => ['required', 'string', 'max:120'],
             'price' => ['required', 'integer', 'min:1'],
             'available_from' => ['nullable', 'date'],
             'available_to' => ['nullable', 'date', 'after_or_equal:available_from'],
@@ -38,6 +40,7 @@ class ListingController extends Controller
         return response()->json(Listing::where('status', 'active')->with(['bookings' => $live])->orderBy('id')->get()->map(fn ($l) => [
             'id' => $l->id, 'name' => $l->name, 'price' => $l->price, 'availability' => $l->availabilityLabel(),
             'available_from' => $l->available_from?->toDateString(), 'available_to' => $l->available_to?->toDateString(),
+            'type' => $l->type, 'location' => $l->location,
             // dates only, never guest names: each pair is [check-in day, check-out day]
             'booked' => $l->bookings->map(fn ($b) => [$b->check_in->toDateString(), $b->check_out->toDateString()])->values()]));
     }

@@ -53,6 +53,14 @@ In order to ensure that the Laravel community is welcoming to all, please review
 
 If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
 
+## Booking payments and decision SMS
+
+Guests select e-wallet, bank transfer, or cash in My bookings and submit a transaction reference when applicable. Payments remain pending until an admin verifies receipt in the Payments tab; hosts and admins cannot approve an unverified booking. Declined or cancelled bookings with submitted payments are marked Refund due. An admin must manually return the money and mark the refund processed.
+
+Payment destinations are not configured in the app. Share payment details with guests through a verified channel; never ask for a PIN or OTP.
+
+Booking approval, denial, and cancellation SMS notifications use Semaphore. Set `SEMAPHORE_API_KEY` in the backend `.env` file and restart Laravel. `SEMAPHORE_SENDER_NAME` is optional. SMS delivery is reported to the staff member if the provider is not configured or rejects a request; admins can retry failed messages from the SMS tab.
+
 ## License
 
 The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).

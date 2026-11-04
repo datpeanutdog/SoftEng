@@ -21,6 +21,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/listings', [ListingController::class, 'index']);
         Route::post('/bookings', [BookingController::class, 'store']);
         Route::patch('/bookings/{booking}', [BookingController::class, 'update']); // guest cancels own request
+        Route::put('/bookings/{booking}/payment', [BookingController::class, 'submitPayment']);
     });
 
     Route::middleware(RoleMiddleware::class . ':Host')->group(function () {
@@ -39,6 +40,9 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/admin/metrics', [AdminController::class, 'metrics']);
         Route::get('/admin/users', [AdminController::class, 'users']);
         Route::patch('/admin/bookings/{booking}', [AdminController::class, 'updateBooking']);
+        Route::post('/admin/bookings/{booking}/payment/verify', [AdminController::class, 'verifyPayment']);
+        Route::post('/admin/bookings/{booking}/refund/complete', [AdminController::class, 'completeRefund']);
+        Route::post('/admin/bookings/{booking}/sms/resend', [AdminController::class, 'resendDecisionSms']);
         Route::patch('/admin/users/{user}', [AdminController::class, 'toggleUser']);
     });
 });

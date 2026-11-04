@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { View, Text, TextInput, TouchableOpacity, ScrollView, RefreshControl, Alert, Platform, StatusBar, ActivityIndicator, Modal, StyleSheet } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, ScrollView, RefreshControl, Alert, Platform, StatusBar, ActivityIndicator, Modal, KeyboardAvoidingView, StyleSheet, useWindowDimensions } from 'react-native';
 import { API } from './config'; // your PC's IP lives in config.js, so updates to this file never erase it
 
 
@@ -59,8 +59,10 @@ const Card = ({ children }) => <View style={s.card}>{children}</View>;
 const Empty = ({ t }) => <Text style={s.empty}>{t}</Text>;
 
 function Page({ title, sub, hook, children }) {
+  const { width } = useWindowDimensions();
+  const desktop = Platform.OS === 'web' && width >= 960;
   return (
-    <ScrollView contentContainerStyle={s.page} refreshControl={<RefreshControl refreshing={hook.ref} onRefresh={hook.reload} />}>
+    <ScrollView style={s.pageScroll} contentContainerStyle={[s.page, desktop && s.desktopPage]} refreshControl={<RefreshControl refreshing={hook.ref} onRefresh={hook.reload} />}>
       <Text style={s.h1}>{title}</Text>
       {sub ? <Text style={s.sub}>{sub}</Text> : null}
       {hook.err ? <Text style={s.err}>{hook.err}</Text> : null}
@@ -75,15 +77,44 @@ const Stats = ({ items }) => (
 // Host: Approve / Decline.  Admin: Approve / Cancel.
 function BookingCard({ b, hook, role }) {
   const host = role === 'Host';
-  const go = (approve) => run(() => host
-    ? call(`/bookings/${b.id}/${approve ? 'approve' : 'decline'}`, 'POST')
-    : call(`/admin/bookings/${b.id}`, 'PATCH', { status: approve ? 'Approved' : 'Cancelled' }), hook);
+  const go = async (approve) => {
+    try {
+      const result = await (host
+        ? call(`/bookings/${b.id}/${approve ? 'approve' : 'decline'}`, 'POST')
+        : call(`/admin/bookings/${b.id}`, 'PATCH', { status: approve ? 'Approved' : 'Cancelled' }));
+      hook.silent();
+      if (result.sms && !result.sms.sent) Alert.alert('SMS notification failed', result.sms.message);
+    } catch (e) { Alert.alert('Could not complete', e.message); }
+  };
   return (
     <Card>
       <View style={s.row}><Text style={s.bold}>{b.guest}</Text><Badge t={b.flag || cap(b.status)} k="w" /></View>
       <Text style={s.mu}>{b.listing} - {b.dates}</Text>
-      <View style={s.row2}><Btn p t="Approve" onPress={() => go(true)} /><Btn t={host ? 'Decline' : 'Cancel'} onPress={() => go(false)} /></View>
+      <Text style={s.mu}>Payment: {b.payment_status === 'verified' ? 'Verified' : b.payment_status === 'pending_verification' ? `Awaiting verification (${b.payment_method || 'unknown'})` : 'Not submitted'}</Text>
+      {b.payment_reference ? <Text style={s.mu}>Reference: {b.payment_reference}</Text> : null}
+      <View style={s.row2}>
+        {b.payment_status === 'verified'
+          ? <Btn p t="Approve" onPress={() => go(true)} />
+          : <Text style={s.mu}>Payment must be verified by an admin before approval.</Text>}
+        <Btn t={host ? 'Decline' : 'Cancel'} onPress={() => go(false)} />
+      </View>
     </Card>
+  );
+}
+
+const TYPES = ['Hotel', 'Airbnb', 'Motel', 'Pension house', 'Resort'];
+const peso = (n) => '\u20B1' + String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+
+function Logo({ size = 60 }) {
+  const w = size * 0.07;
+  return (
+    <View style={{ width: size, height: size, borderRadius: size * 0.3, backgroundColor: C.brand, alignItems: 'center', justifyContent: 'center' }}>
+      <View style={{ width: size * 0.32, height: size * 0.24, borderWidth: w, borderBottomWidth: 0, borderColor: '#fff', borderTopLeftRadius: size * 0.16, borderTopRightRadius: size * 0.16 }} />
+      <View style={{ width: size * 0.5, height: size * 0.34, borderRadius: size * 0.07, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center', marginTop: -1 }}>
+        <View style={{ width: size * 0.09, height: size * 0.09, borderRadius: size * 0.05, backgroundColor: C.brand }} />
+        <View style={{ width: size * 0.035, height: size * 0.08, backgroundColor: C.brand, marginTop: -1 }} />
+      </View>
+    </View>
   );
 }
 
@@ -150,9 +181,10 @@ function DateField({ label, value, onChange, min, max, clearable, blocked = [] }
   );
 }
 
-function Stay({ l, onDone }) {
+function Stay({ l, onDone, onPayment }) {
   const [i, setI] = useState('');
   const [o, setO] = useState('');
+  const [requested, setRequested] = useState(false);
   const today = iso(new Date());
   const minIn = l.available_from && l.available_from > today ? l.available_from : today;
   const minOut = iso(addDays(parseD(i || minIn), 1));
@@ -162,26 +194,74 @@ function Stay({ l, onDone }) {
   const go = async () => {
     try {
       const d = await call('/bookings', 'POST', { listing_id: l.id, check_in: i, check_out: o });
-      Alert.alert('Request sent', d.message); setI(''); setO(''); onDone();
+      setI(''); setO(''); setRequested(true); onDone();
     } catch (e) { Alert.alert('Could not send request', e.message); }
   };
   return (
     <Card>
-      <Text style={s.bold}>{l.name}</Text>
-      <Text style={s.mu}>${l.price} / night - {l.availability}</Text>
+      <View style={s.row}><Text style={s.bold}>{l.name}</Text><Badge t={l.type} /></View>
+      <Text style={s.mu}>{l.location}, Cagayan de Oro</Text>
+      <Text style={s.price}>{peso(l.price)} <Text style={s.mu}>per night</Text></Text>
+      <Text style={s.mu}>Available: {l.availability}</Text>
       <DateField label="Check-in date" value={i} min={minIn} max={l.available_to || undefined} blocked={booked} onChange={(v) => { setI(v); setO(''); }} />
       <DateField label="Check-out date" value={o} min={minOut} max={maxOut} onChange={setO} />
       {nextStart ? <Text style={s.mu}>Latest check-out: {pretty(maxOut)} (next booking starts then)</Text> : null}
       <Btn p t="Request booking" onPress={go} />
+      {requested && <View style={s.paymentNotice}><Text style={s.paymentNoticeText}>Booking request sent. Submit payment from My bookings so it can be reviewed.</Text><Btn t="Go to My bookings" onPress={onPayment} /></View>}
     </Card>
   );
 }
-function Stays() {
+function Stays({ onPayment }) {
   const h = useLoad('/listings');
   return (
     <Page title="Find a stay" sub="Check-in 2:00 PM, check-out 11:00 AM." hook={h}>
-      {h.data && (h.data[0].length ? h.data[0].map((l) => <Stay key={l.id} l={l} onDone={h.silent} />) : <Empty t="No listings are open right now." />)}
+      {h.data && (h.data[0].length ? h.data[0].map((l) => <Stay key={l.id} l={l} onDone={h.silent} onPayment={onPayment} />) : <Empty t="No listings are open right now." />)}
     </Page>
+  );
+}
+function PaymentForm({ booking, onSubmitted }) {
+  const [method, setMethod] = useState('ewallet');
+  const [reference, setReference] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    setBusy(true); setError('');
+    try {
+      await call(`/bookings/${booking.id}/payment`, 'PUT', {
+        payment_method: method,
+        payment_reference: reference.trim() || null,
+      });
+      onSubmitted();
+    } catch (e) { setError(e.message); }
+    setBusy(false);
+  };
+  return (
+    <View style={s.paymentBox}>
+      <Text style={s.bold}>Payment</Text>
+      <Text style={s.mu}>Total: {peso(booking.total)}</Text>
+      <View style={s.row2}>
+        {[
+          ['ewallet', 'E-wallet'],
+          ['bank_transfer', 'Bank transfer'],
+          ['cash', 'Cash'],
+        ].map(([value, label]) => (
+          <TouchableOpacity key={value} style={[s.chip, method === value && s.chipOn]} onPress={() => setMethod(value)}>
+            <Text style={[s.chipT, method === value && { color: '#fff' }]}>{label}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+      {method === 'cash' ? (
+        <Text style={s.mu}>Pay the host in person and request a receipt. The booking stays unapproved until an admin verifies that payment was received.</Text>
+      ) : (
+        <>
+          <Text style={s.mu}>Pay using details provided by the host through a verified channel, then enter your transaction reference. Never share your PIN or OTP.</Text>
+          <TextInput style={s.input} placeholder="Transaction reference" value={reference} onChangeText={setReference} />
+        </>
+      )}
+      <Text style={s.paymentSafety}>Payment is manually verified. Do not send money to unverified accounts.</Text>
+      {error ? <Text style={s.err}>{error}</Text> : null}
+      <Btn p t={busy ? 'Submitting...' : 'Submit payment for verification'} onPress={submit} />
+    </View>
   );
 }
 function MyBookings() {
@@ -192,7 +272,12 @@ function MyBookings() {
         <Card key={b.id}>
           <View style={s.row}><Text style={s.bold}>{b.listing}</Text><Badge t={b.flag && b.status === 'Flagged' ? 'Under review' : cap(b.status)} k={kind(b.status)} /></View>
           <Text style={s.mu}>{b.dates}</Text>
+          <Text style={s.mu}>Total: {peso(b.total)} ({b.nights} {b.nights === 1 ? 'night' : 'nights'})</Text>
           {b.code ? <Text style={s.code}>Door code: {b.code}</Text> : null}
+          {b.payment_status !== 'unpaid' && <Text style={s.mu}>Payment: {b.payment_status === 'pending_verification' ? 'Awaiting admin verification' : cap(b.payment_status)}{b.payment_method ? ` via ${b.payment_method.replace('_', ' ')}` : ''}</Text>}
+          {b.refund_status === 'due' && <Text style={s.refundNotice}>Refund due: an admin must process this refund manually.</Text>}
+          {b.refund_status === 'refunded' && <Text style={s.mu}>Refund marked as processed.</Text>}
+          {b.payment_status === 'unpaid' && ['Pending', 'Flagged'].includes(b.status) && <PaymentForm booking={b} onSubmitted={h.silent} />}
           {['Pending', 'Flagged'].includes(b.status) && (
             <View style={s.row2}><Btn t="Cancel request" onPress={() => ask('Cancel this request?', () => run(() => call(`/bookings/${b.id}`, 'PATCH'), h))} /></View>
           )}
@@ -220,13 +305,15 @@ function Requests() {
 }
 function ListingForm({ l, onSave, onCancel }) {
   const [name, setName] = useState(l ? l.name : '');
+  const [type, setType] = useState(l ? l.type : 'Hotel');
+  const [location, setLocation] = useState(l && l.location ? l.location : '');
   const [price, setPrice] = useState(l ? String(l.price) : '');
   const [from, setFrom] = useState(l && l.available_from ? l.available_from : '');
   const [to, setTo] = useState(l && l.available_to ? l.available_to : '');
   const [status, setStatus] = useState(l ? l.status : 'active');
   const save = async () => {
     try {
-      const body = { name, price: parseInt(price, 10), available_from: from || null, available_to: to || null, status };
+      const body = { name, type, location, price: parseInt(price, 10), available_from: from || null, available_to: to || null, status };
       if (l) await call(`/host/listings/${l.id}`, 'PUT', body); else await call('/host/listings', 'POST', body);
       onSave();
     } catch (e) { Alert.alert('Could not save listing', e.message); }
@@ -234,8 +321,17 @@ function ListingForm({ l, onSave, onCancel }) {
   return (
     <Card>
       <Text style={s.bold}>{l ? 'Edit listing' : 'Add listing'}</Text>
-      <TextInput style={s.input} placeholder="Listing name" value={name} onChangeText={setName} />
-      <TextInput style={s.input} placeholder="Price per night (USD)" value={price} onChangeText={setPrice} keyboardType="number-pad" />
+      <TextInput style={s.input} placeholder="Property name" value={name} onChangeText={setName} />
+      <Text style={s.mu}>Property type</Text>
+      <View style={s.row2}>
+        {TYPES.map((t) => (
+          <TouchableOpacity key={t} style={[s.chip, type === t && s.chipOn]} onPress={() => setType(t)}>
+            <Text style={[s.chipT, type === t && { color: '#fff' }]}>{t}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+      <TextInput style={s.input} placeholder="Area in Cagayan de Oro (e.g. Carmen)" value={location} onChangeText={setLocation} />
+      <TextInput style={s.input} placeholder="Price per night (PHP)" value={price} onChangeText={setPrice} keyboardType="number-pad" />
       <DateField label="Available from (optional)" value={from} onChange={setFrom} clearable />
       <DateField label="Available until (optional)" value={to} min={from || undefined} onChange={setTo} clearable />
       <View style={s.row2}>
@@ -261,7 +357,8 @@ function HostListings() {
         ) : (
           <Card key={l.id}>
             <View style={s.row}><Text style={s.bold}>{l.name}</Text><Badge t={cap(l.status)} k={l.status === 'active' ? 'ok' : ''} /></View>
-            <Text style={s.mu}>${l.price} / night - {l.availability}</Text>
+            <Text style={s.mu}>{l.type} - {l.location}, Cagayan de Oro</Text>
+            <Text style={s.mu}>{peso(l.price)} per night - {l.availability}</Text>
             <View style={s.row2}>
               <Btn t="Edit" onPress={() => { setAdding(false); setEditId(l.id); }} />
               <Btn t="Delete" onPress={() => ask('Delete ' + l.name + '?', () => run(() => call(`/host/listings/${l.id}`, 'DELETE'), h))} />
@@ -273,12 +370,26 @@ function HostListings() {
   );
 }
 function Doorlock() {
-  const h = useLoad('/host/doorlock');
-  const d = h.data && h.data[0];
+  const [sel, setSel] = useState(null);
+  const h = useLoad(['/host/listings', '/host/doorlock' + (sel ? '?listing=' + sel : '')]);
+  const ls = h.data ? h.data[0] : [];
+  const d = h.data && h.data[1];
   return (
     <Page title="Doorlock" sub={d && d.listing ? d.listing.name : 'Battery, access, and activity.'} hook={h}>
       {d && !d.listing && <Empty t="Add a listing first. Each listing has its own smart lock." />}
       {d && d.listing && <>
+        {ls.length > 1 && (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
+            {ls.map((l) => {
+              const on = d.listing.id === l.id;
+              return (
+                <TouchableOpacity key={l.id} style={[s.chip, on && s.chipOn]} onPress={() => setSel(l.id)}>
+                  <Text style={[s.chipT, on && { color: '#fff' }]}>{l.name}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        )}
         {d.listing.battery < 20 && (
           <View style={s.alert}>
             <Text style={{ color: '#c2321b', fontWeight: '600' }}>Battery is below 20%. Replace it soon so guests are not locked out.</Text>
@@ -327,6 +438,52 @@ function Flagged() {
     </Page>
   );
 }
+function AdminPayments() {
+  const h = useLoad('/bookings');
+  const items = h.data ? h.data[0].filter((b) => b.payment_status === 'pending_verification' || b.refund_status === 'due') : [];
+  return (
+    <Page title="Payments & refunds" sub="Verify guest payments before a booking is approved. Process due refunds manually." hook={h}>
+      {h.data && (items.length ? items.map((b) => (
+        <Card key={b.id}>
+          <View style={s.row}><Text style={s.bold}>{b.guest} - {b.listing}</Text><Badge t={b.refund_status === 'due' ? 'Refund due' : 'Verify payment'} k={b.refund_status === 'due' ? 'bad' : 'w'} /></View>
+          <Text style={s.mu}>{b.dates} - {peso(b.total)} ({b.nights} {b.nights === 1 ? 'night' : 'nights'})</Text>
+          <Text style={s.mu}>Booking: {b.status} - Method: {b.payment_method ? b.payment_method.replace('_', ' ') : 'Not set'}</Text>
+          {b.payment_reference ? <Text style={s.mu}>Reference: {b.payment_reference}</Text> : null}
+          {b.payment_status === 'pending_verification' && <View style={s.paymentNotice}>
+            <Text style={s.paymentSafety}>Confirm the payment independently with the provider or host before marking it verified.</Text>
+            <Btn p t="Mark payment verified" onPress={() => run(() => call(`/admin/bookings/${b.id}/payment/verify`, 'POST'), h)} />
+          </View>}
+          {b.refund_status === 'due' && <View style={s.paymentNotice}>
+            <Text style={s.refundNotice}>Confirm the money was received and manually returned before marking this refund complete.</Text>
+            <Btn t="Mark refund processed" onPress={() => ask('Confirm that this refund was manually sent?', () => run(() => call(`/admin/bookings/${b.id}/refund/complete`, 'POST'), h))} />
+          </View>}
+        </Card>
+      )) : <Empty t="No payments need verification and no refunds are due." />)}
+    </Page>
+  );
+}
+function AdminSms() {
+  const h = useLoad('/bookings');
+  const failed = h.data ? h.data[0].filter((b) => b.decision_sms_status === 'failed') : [];
+  const resend = async (booking) => {
+    try {
+      const result = await call(`/admin/bookings/${booking.id}/sms/resend`, 'POST');
+      h.silent();
+      if (!result.sms.sent) Alert.alert('SMS notification failed', result.sms.message);
+    } catch (e) { Alert.alert('Could not resend SMS', e.message); }
+  };
+  return (
+    <Page title="SMS notifications" sub="Review and retry decision texts that could not be sent." hook={h}>
+      {h.data && (failed.length ? failed.map((b) => (
+        <Card key={b.id}>
+          <View style={s.row}><Text style={s.bold}>{b.guest} - {b.listing}</Text><Badge t={cap(b.status)} k={kind(b.status)} /></View>
+          <Text style={s.mu}>{b.dates} - SMS failed</Text>
+          <Btn t="Retry SMS" onPress={() => resend(b)} />
+        </Card>
+      )) : <Empty t="No failed decision SMS notifications." />)}
+    </Page>
+  );
+}
 function Users() {
   const h = useLoad('/admin/users');
   return (
@@ -335,6 +492,7 @@ function Users() {
         <Card key={u.id}>
           <View style={s.row}><Text style={s.bold}>{u.name}</Text><Badge t={u.active ? 'Active' : 'Disabled'} k={u.active ? 'ok' : 'bad'} /></View>
           <Text style={s.mu}>{u.role} - {u.email}</Text>
+          {u.phone ? <Text style={s.mu}>{u.phone}</Text> : null}
           {u.role !== 'Admin' && (
             <View style={s.row2}>
               {u.active
@@ -349,78 +507,161 @@ function Users() {
 }
 
 // ---------- Login / register + shell ----------
-function Login({ onDone }) {
+function Login({ onDone, desktop }) {
   const [reg, setReg] = useState(false);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
   const [pw, setPw] = useState('');
+  const [show, setShow] = useState(false);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
   const go = async () => {
+    if (!email.trim() || !pw || (reg && (!name.trim() || !/^9\d{9}$/.test(phone)))) {
+      setErr(reg && !/^9\d{9}$/.test(phone) ? 'Enter a 10-digit Philippine mobile number starting with 9.' : 'Please fill in all the fields.');
+      return;
+    }
     setBusy(true); setErr('');
     try {
-      const d = reg ? await call('/register', 'POST', { name, email, password: pw }) : await call('/login', 'POST', { email, password: pw });
+      const d = reg
+        ? await call('/register', 'POST', { name: name.trim(), email: email.trim(), password: pw, phone: `+63${phone}` })
+        : await call('/login', 'POST', { email: email.trim(), password: pw });
       TOKEN = d.token; onDone(d.user);
     } catch (e) { setErr(e.message); }
     setBusy(false);
   };
-  const fill = (e, p) => { setReg(false); setEmail(e); setPw(p); };
   return (
-    <ScrollView style={s.app} contentContainerStyle={{ padding: 24, flexGrow: 1, justifyContent: 'center' }} keyboardShouldPersistTaps="handled">
-      <Text style={s.brand}>Airbnb Check-in System</Text>
-      <Text style={s.h1}>{reg ? 'Create a guest account' : 'Log in'}</Text>
-      {err ? <Text style={s.err}>{err}</Text> : null}
-      {reg && <TextInput style={s.input} placeholder="Full name" value={name} onChangeText={setName} />}
-      <TextInput style={s.input} placeholder="Email" value={email} onChangeText={setEmail} autoCapitalize="none" keyboardType="email-address" />
-      <TextInput style={s.input} placeholder={reg ? 'Password (6+ characters)' : 'Password'} value={pw} onChangeText={setPw} secureTextEntry autoCapitalize="none" />
-      <Btn p t={busy ? 'Please wait...' : reg ? 'Create account' : 'Log in'} onPress={go} />
-      <TouchableOpacity onPress={() => setReg(!reg)} style={{ marginTop: 14 }}><Text style={s.mu}>{reg ? 'Already registered? Log in' : 'New guest? Create an account'}</Text></TouchableOpacity>
-      <Text style={[s.mu, { marginTop: 22 }]}>Demo accounts. Tap to fill:</Text>
-      <View style={s.row2}>
-        <Btn t="Admin" onPress={() => fill('admin@doorkey.demo', 'admin123')} />
-        <Btn t="Host" onPress={() => fill('host@doorkey.demo', 'host123')} />
-        <Btn t="Guest" onPress={() => fill('maria@doorkey.demo', 'guest123')} />
-      </View>
-    </ScrollView>
+    <KeyboardAvoidingView style={[s.app, desktop && s.loginDesktopApp]} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <ScrollView contentContainerStyle={[s.loginWrap, desktop && s.loginDesktopWrap]} keyboardShouldPersistTaps="handled">
+        <View style={s.loginBrandRow}><Logo size={48} /><Text style={s.loginBrand}>LockBay</Text></View>
+        <Text style={s.loginTag}>Smart check-in for stays in Cagayan de Oro</Text>
+        <View style={[s.loginCard, desktop && s.loginDesktopCard]}>
+          <Text style={s.h1}>{reg ? 'Create your account' : 'Welcome back'}</Text>
+          <Text style={s.sub}>{reg ? 'Sign up as a guest to book your stay.' : 'Log in to continue.'}</Text>
+          {err ? <Text style={s.err}>{err}</Text> : null}
+          {reg && <>
+            <Text style={s.label}>Full name</Text>
+            <TextInput style={s.input} value={name} onChangeText={setName} autoComplete="name" />
+            <Text style={s.label}>Philippine mobile number</Text>
+            <View style={s.phoneRow}>
+              <Text style={s.phonePrefix}>+63</Text>
+              <TextInput style={[s.input, s.phoneInput]} value={phone} onChangeText={(value) => setPhone(value.replace(/\D/g, '').slice(0, 10))} keyboardType="phone-pad" autoComplete="tel" placeholder="9XX XXX XXXX" maxLength={10} />
+            </View>
+          </>}
+          <Text style={s.label}>Email</Text>
+          <TextInput style={s.input} value={email} onChangeText={setEmail} autoCapitalize="none" keyboardType="email-address" autoComplete="email" />
+          <Text style={s.label}>Password</Text>
+          <View style={s.pwRow}>
+            <TextInput style={[s.input, { flex: 1, marginVertical: 0, borderWidth: 0 }]} value={pw} onChangeText={setPw} secureTextEntry={!show} autoCapitalize="none" autoComplete="password" />
+            <TouchableOpacity onPress={() => setShow(!show)}><Text style={s.link}>{show ? 'Hide' : 'Show'}</Text></TouchableOpacity>
+          </View>
+          <View style={{ height: 14 }} />
+          <Btn p t={busy ? 'Please wait...' : reg ? 'Create account' : 'Log in'} onPress={go} />
+          <TouchableOpacity onPress={() => { setReg(!reg); setErr(''); }} style={{ marginTop: 16, alignItems: 'center' }}>
+            <Text style={s.mu}>{reg ? 'Already have an account? ' : 'New here? '}<Text style={s.link}>{reg ? 'Log in' : 'Create an account'}</Text></Text>
+          </TouchableOpacity>
+        </View>
+      </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
 
 const TABS = {
   Guest: [['Stays', Stays], ['My bookings', MyBookings]],
   Host: [['Requests', Requests], ['Listings', HostListings], ['Doorlock', Doorlock]],
-  Admin: [['Pending', AdminPending], ['Flagged', Flagged], ['Users', Users]],
+  Admin: [['Pending', AdminPending], ['Flagged', Flagged], ['Payments', AdminPayments], ['SMS', AdminSms], ['Users', Users]],
 };
 
 export default function App() {
   const [user, setUser] = useState(null);
   const [tab, setTab] = useState(0);
-  if (!user) return <Login onDone={(u) => { setTab(0); setUser(u); }} />;
+  const { width } = useWindowDimensions();
+  const desktop = Platform.OS === 'web' && width >= 960;
+  if (!user) return <Login desktop={desktop} onDone={(u) => { setTab(0); setUser(u); }} />;
   const tabs = TABS[user.role] || TABS.Guest;
   const Screen = tabs[tab][1];
   const out = async () => { try { await call('/logout', 'POST'); } catch (e) {} TOKEN = null; setUser(null); };
   return (
-    <View style={s.app}>
-      <View style={s.top}>
-        <Text style={s.brand}>Check-in</Text>
-        <TouchableOpacity onPress={out}><Text style={s.mu}>{user.role}: log out</Text></TouchableOpacity>
-      </View>
-      <Screen key={tab} />
-      <View style={s.nav}>
-        {tabs.map(([l], i) => (
-          <TouchableOpacity key={l} style={[s.navI, i === tab && s.navOn]} onPress={() => setTab(i)}>
-            <Text style={[s.navT, i === tab && { color: C.tx, fontWeight: '700' }]}>{l}</Text>
-          </TouchableOpacity>
-        ))}
-      </View>
+    <View style={[s.app, desktop && s.desktopApp]}>
+      {desktop ? (
+        <View style={s.desktopLayout}>
+          <View style={s.sidebar}>
+            <View style={s.brandRow}><Logo size={36} /><Text style={s.brandName}>LockBay</Text></View>
+            <Text style={s.sidebarLabel}>WORKSPACE</Text>
+            <View style={s.desktopNav}>
+              {tabs.map(([l], i) => (
+                <TouchableOpacity key={l} style={[s.desktopNavI, i === tab && s.desktopNavOn]} onPress={() => setTab(i)}>
+                  <Text style={[s.desktopNavT, i === tab && s.desktopNavTOn]}>{l}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <View style={s.sidebarAccount}>
+              <Text style={s.sidebarName}>{user.name || user.role}</Text>
+              <Text style={s.mu}>{user.role} account</Text>
+              <TouchableOpacity onPress={out} style={s.logoutButton}>
+                <Text style={s.logoutText}>Log out</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+          <View style={s.desktopMain}>
+            <View style={s.desktopHeader}>
+              <View>
+                <Text style={s.desktopEyebrow}>LOCKBAY / {user.role.toUpperCase()}</Text>
+                <Text style={s.desktopHeading}>{tabs[tab][0]}</Text>
+              </View>
+              <Text style={s.desktopStatus}>Smart stay management</Text>
+            </View>
+            <View style={s.desktopScreen}>
+              <Screen key={tab} {...(user.role === 'Guest' && tab === 0 ? { onPayment: () => setTab(1) } : {})} />
+            </View>
+          </View>
+        </View>
+      ) : (
+        <>
+          <View style={s.top}>
+            <View style={s.brandRow}><Logo size={30} /><Text style={s.brandName}>LockBay</Text></View>
+            <TouchableOpacity onPress={out}><Text style={s.mu}>{user.role}: log out</Text></TouchableOpacity>
+          </View>
+          <Screen key={tab} {...(user.role === 'Guest' && tab === 0 ? { onPayment: () => setTab(1) } : {})} />
+          <View style={s.nav}>
+            {tabs.map(([l], i) => (
+              <TouchableOpacity key={l} style={[s.navI, i === tab && s.navOn]} onPress={() => setTab(i)}>
+                <Text style={[s.navT, i === tab && { color: C.tx, fontWeight: '700' }]}>{l}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </>
+      )}
     </View>
   );
 }
 
 const s = StyleSheet.create({
-  app: { flex: 1, backgroundColor: '#fff', paddingTop: Platform.OS === 'ios' ? 54 : (StatusBar.currentHeight || 24) + 8 },
+  app: { flex: 1, backgroundColor: '#fff', paddingTop: Platform.OS === 'web' ? 0 : Platform.OS === 'ios' ? 54 : (StatusBar.currentHeight || 24) + 8 },
+  desktopApp: { paddingTop: 0, backgroundColor: C.side },
+  desktopLayout: { flex: 1, flexDirection: 'row' },
+  sidebar: { width: 252, backgroundColor: '#fff', borderRightWidth: 1, borderRightColor: C.line, paddingHorizontal: 22, paddingTop: 28, paddingBottom: 20 },
+  sidebarLabel: { color: C.mu, fontSize: 11, fontWeight: '700', letterSpacing: 1.2, marginTop: 48, marginBottom: 12 },
+  desktopNav: { gap: 5 },
+  desktopNavI: { borderRadius: 10, paddingHorizontal: 13, paddingVertical: 12 },
+  desktopNavOn: { backgroundColor: '#f2f2f2' },
+  desktopNavT: { color: C.mu, fontSize: 14, fontWeight: '500' },
+  desktopNavTOn: { color: C.tx, fontWeight: '700' },
+  sidebarAccount: { marginTop: 'auto', borderTopWidth: 1, borderTopColor: C.line, paddingTop: 18 },
+  sidebarName: { color: C.tx, fontSize: 14, fontWeight: '700', marginBottom: 4 },
+  logoutButton: { marginTop: 12, borderWidth: 1, borderColor: C.line, borderRadius: 8, paddingVertical: 9, alignItems: 'center' },
+  logoutText: { color: C.tx, fontSize: 13, fontWeight: '600' },
+  desktopMain: { flex: 1, minWidth: 0 },
+  desktopHeader: { minHeight: 82, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 36, backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: C.line },
+  desktopEyebrow: { color: C.mu, fontSize: 10, fontWeight: '700', letterSpacing: 1.1, marginBottom: 4 },
+  desktopHeading: { color: C.tx, fontSize: 18, fontWeight: '700' },
+  desktopStatus: { color: C.mu, fontSize: 13 },
+  desktopScreen: { flex: 1 },
+  pageScroll: { flex: 1 },
   top: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 21, paddingBottom: 6 },
   brand: { color: C.brand, fontWeight: '700', fontSize: 16 },
   page: { padding: 21, paddingBottom: 120 },
+  desktopPage: { width: '100%', maxWidth: 1120, alignSelf: 'center', padding: 36, paddingBottom: 48 },
   h1: { fontSize: 24, fontWeight: '700', color: C.tx, marginBottom: 4 },
   h2: { fontSize: 15, fontWeight: '600', color: C.tx, marginTop: 18, marginBottom: 10 },
   sub: { color: C.mu, marginBottom: 16 },
@@ -441,6 +682,11 @@ const s = StyleSheet.create({
   stat: { flex: 1, borderWidth: 1, borderColor: C.line, borderRadius: 12, padding: 12 },
   code: { fontSize: 18, fontWeight: '700', color: C.tx, letterSpacing: 1 },
   alert: { backgroundColor: '#fde8e4', borderRadius: 12, padding: 14, gap: 10, marginBottom: 14 },
+  paymentBox: { backgroundColor: C.side, borderWidth: 1, borderColor: C.line, borderRadius: 12, padding: 14, gap: 8, marginTop: 8 },
+  paymentNotice: { backgroundColor: '#f7f7f7', borderRadius: 10, padding: 12, gap: 8, marginTop: 8 },
+  paymentNoticeText: { color: C.tx, fontSize: 13 },
+  paymentSafety: { color: '#8a5a00', fontSize: 12 },
+  refundNotice: { color: '#c2321b', fontSize: 13, fontWeight: '600' },
   nav: { position: 'absolute', left: 21, right: 21, bottom: 22, flexDirection: 'row', backgroundColor: C.side, borderWidth: 1, borderColor: C.line, borderRadius: 16, padding: 6, gap: 4 },
   navI: { flex: 1, alignItems: 'center', paddingVertical: 10, borderRadius: 10 },
   navOn: { backgroundColor: '#ececec' },
@@ -455,4 +701,27 @@ const s = StyleSheet.create({
   calCell: { width: '14.28%', height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 20 },
   calSel: { backgroundColor: C.brand },
   calOcc: { backgroundColor: '#fde8e4' },
+  price: { fontSize: 18, fontWeight: '700', color: C.tx },
+  label: { color: C.tx, fontWeight: '600', fontSize: 13, marginTop: 8 },
+  chip: { borderWidth: 1, borderColor: C.line, borderRadius: 99, paddingHorizontal: 14, paddingVertical: 8, marginRight: 8 },
+  chipOn: { backgroundColor: '#222', borderColor: '#222' },
+  chipT: { color: C.tx, fontWeight: '600', fontSize: 13 },
+  loginWrap: { flexGrow: 1, justifyContent: 'center', padding: 24 },
+  loginDesktopApp: { backgroundColor: C.side },
+  loginDesktopWrap: { alignItems: 'center', paddingVertical: 48 },
+  loginDesktopCard: { width: '100%', maxWidth: 460, backgroundColor: '#fff' },
+  logo: { width: 60, height: 60, borderRadius: 18, backgroundColor: C.brand, alignItems: 'center', justifyContent: 'center', alignSelf: 'center' },
+  door: { width: 22, height: 32, borderRadius: 5, backgroundColor: '#fff', justifyContent: 'center', alignItems: 'flex-end', paddingRight: 4 },
+  knob: { width: 5, height: 5, borderRadius: 3, backgroundColor: C.brand },
+  loginBrandRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 12, marginBottom: 2 },
+  loginBrand: { fontSize: 32, fontWeight: '800', color: C.tx, letterSpacing: -0.5 },
+  brandRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  brandName: { fontSize: 18, fontWeight: '800', color: C.tx, letterSpacing: -0.3 },
+  loginTag: { textAlign: 'center', color: C.mu, marginTop: 4, marginBottom: 22 },
+  loginCard: { borderWidth: 1, borderColor: C.line, borderRadius: 18, padding: 20 },
+  phoneRow: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: C.line, borderRadius: 8, paddingLeft: 12, marginVertical: 5 },
+  phonePrefix: { color: C.tx, fontWeight: '600' },
+  phoneInput: { flex: 1, marginVertical: 0, borderWidth: 0 },
+  pwRow: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: C.line, borderRadius: 8, paddingRight: 12, marginVertical: 5 },
+  link: { color: C.brand, fontWeight: '600', fontSize: 13 },
 });

@@ -10,6 +10,7 @@ class DatabaseSeeder extends Seeder
 
     public function run(): void
     {
-        $this->call([DemoUserSeeder::class, DemoDataSeeder::class]);
+        // DemoDataSeeder creates the team accounts, sample guests, places and bookings.
+        $this->call([DemoDataSeeder::class]);
     }
 }

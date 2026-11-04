@@ -3,6 +3,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\{Booking, User};
+use App\Services\DecisionSms;
 use Illuminate\Http\Request;
 
 class AdminController extends Controller
@@ -22,14 +23,53 @@ class AdminController extends Controller
 
     public function users() { return response()->json(User::orderBy('id')->get()); }
 
-    public function updateBooking(Request $request, Booking $booking)
+    public function updateBooking(Request $request, Booking $booking, DecisionSms $sms)
     {
         $d = $request->validate(['status' => ['required', 'in:Approved,Denied,Cancelled']]);
         if (!in_array($booking->status, ['Pending', 'Flagged'], true)) {
             return response()->json(['message' => 'This booking was already handled.'], 422);
         }
+        if ($d['status'] === 'Approved' && $booking->payment_status !== 'verified') {
+            return response()->json(['message' => 'Payment must be verified before approving this booking.'], 422);
+        }
         $d['status'] === 'Approved' ? $booking->approve() : $booking->reject($d['status']);
+        $notification = $sms->send($booking);
+        return response()->json($booking->toRow() + ['sms' => $notification]);
+    }
+
+    public function verifyPayment(Booking $booking)
+    {
+        if (! in_array($booking->status, ['Pending', 'Flagged'], true)) {
+            return response()->json(['message' => 'Only pending bookings can have payment verified.'], 422);
+        }
+        if ($booking->payment_status !== 'pending_verification') {
+            return response()->json(['message' => 'This booking has no payment awaiting verification.'], 422);
+        }
+
+        $booking->update(['payment_status' => 'verified']);
+
         return response()->json($booking->toRow());
+    }
+
+    public function completeRefund(Booking $booking)
+    {
+        if (! in_array($booking->status, ['Denied', 'Cancelled'], true) || $booking->refund_status !== 'due') {
+            return response()->json(['message' => 'This booking has no refund due.'], 422);
+        }
+
+        $booking->update(['refund_status' => 'refunded']);
+
+        return response()->json($booking->toRow());
+    }
+
+    public function resendDecisionSms(Booking $booking, DecisionSms $sms)
+    {
+        if (! in_array($booking->status, ['Approved', 'Denied', 'Cancelled'], true)) {
+            return response()->json(['message' => 'SMS can only be resent for a booking that has been decided.'], 422);
+        }
+
+        $notification = $sms->send($booking);
+        return response()->json($booking->toRow() + ['sms' => $notification]);
     }
 
     public function toggleUser(Request $request, User $user)

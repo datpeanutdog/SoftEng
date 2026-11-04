@@ -5,7 +5,7 @@ use Illuminate\Database\Eloquent\Model;
 
 class Listing extends Model
 {
-    protected $fillable = ['host_id', 'name', 'price', 'available_from', 'available_to', 'status', 'battery'];
+    protected $fillable = ['host_id', 'name', 'type', 'location', 'price', 'available_from', 'available_to', 'status', 'battery'];
     protected $casts = ['available_from' => 'date', 'available_to' => 'date'];
 
     public function bookings() { return $this->hasMany(Booking::class); }
