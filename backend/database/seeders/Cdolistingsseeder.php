@@ -48,7 +48,7 @@ class CdoListingsSeeder extends Seeder
         $sogo     = $mk($joshlie, 'Hotel Sogo Cagayan de Oro', 'Motel', 'Claro M. Recto Ave, Lapasan', 1100, 18);   // (reviewer) low battery, demos the alert
 
         // ---- John: Airbnbs --------------------------------------------------------------
-        $ljcozy   = $mk($john, 'LJ Cozy Place',                 'Airbnb', 'Bria Condo, Rodolfo N. Pelaez Blvd', 1800);       // placeholder price
+        $ljcozy   = $mk($john, 'Cozy Place-Uptown CDO(Near Hall of Justice/SM)',                 'Airbnb', 'Bria Condo, Rodolfo N. Pelaez Blvd', 1800);       // placeholder price
         $studio   = $mk($john, 'Modern Studio @ the Heart of CDO', 'Airbnb', 'Avida Towers Aspira, Ramon Chavez St', 1600, 64); // placeholder price
 
         // ---- Loniel: pension house + resorts -------------------------------------------
@@ -89,5 +89,8 @@ class CdoListingsSeeder extends Seeder
         foreach ([['Door unlocked with access code', 'success', 26], ['Wrong code entered', 'failed', 26.1], ['Wrong code entered', 'failed', 26.2]] as [$e, $r, $h]) {
             $luxe->events()->create(['event' => $e, 'result' => $r, 'created_at' => now()->subMinutes((int) ($h * 60))]);
         }
+
+        // Link the photo files in public/images/listings/
+        $this->call(ListingPhotosSeeder::class);
     }
 }

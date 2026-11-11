@@ -15,7 +15,7 @@ class ListingController extends Controller
     {
         return [
             'id' => $l->id, 'name' => $l->name, 'price' => $l->price, 'availability' => $l->availabilityLabel(),
-            'status' => $l->status, 'battery' => $l->battery, 'type' => $l->type, 'location' => $l->location,
+            'status' => $l->status, 'battery' => $l->battery, 'type' => $l->type, 'location' => $l->location, 'photo' => $l->photoUrl(), 'photos' => $l->photoUrls(),
             'available_from' => $l->available_from?->toDateString(), 'available_to' => $l->available_to?->toDateString(),
         ];
     }
@@ -40,7 +40,7 @@ class ListingController extends Controller
         return response()->json(Listing::where('status', 'active')->with(['bookings' => $live])->orderBy('id')->get()->map(fn ($l) => [
             'id' => $l->id, 'name' => $l->name, 'price' => $l->price, 'availability' => $l->availabilityLabel(),
             'available_from' => $l->available_from?->toDateString(), 'available_to' => $l->available_to?->toDateString(),
-            'type' => $l->type, 'location' => $l->location,
+            'type' => $l->type, 'location' => $l->location, 'photo' => $l->photoUrl(), 'photos' => $l->photoUrls(),
             // dates only, never guest names: each pair is [check-in day, check-out day]
             'booked' => $l->bookings->map(fn ($b) => [$b->check_in->toDateString(), $b->check_out->toDateString()])->values()]));
     }

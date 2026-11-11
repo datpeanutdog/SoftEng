@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { View, Text, TextInput, TouchableOpacity, ScrollView, RefreshControl, Alert, Platform, StatusBar, ActivityIndicator, Modal, KeyboardAvoidingView, StyleSheet, useWindowDimensions } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, ScrollView, RefreshControl, Alert, Platform, StatusBar, ActivityIndicator, Image, Modal, KeyboardAvoidingView, StyleSheet, useWindowDimensions } from 'react-native';
 import { API } from './config'; // your PC's IP lives in config.js, so updates to this file never erase it
 
 
@@ -181,6 +181,31 @@ function DateField({ label, value, onChange, min, max, clearable, blocked = [] }
   );
 }
 
+function Photo({ uris }) {
+  const [w, setW] = useState(0);
+  const [i, setI] = useState(0);
+  const [bad, setBad] = useState([]);
+  const ref = React.useRef(null);
+  const list = (uris || []).filter((u) => u && !bad.includes(u));
+  if (!list.length) return <View style={[s.photo, s.photoEmpty]}><Text style={s.mu}>No photo yet</Text></View>;
+  const go = (n) => { const k = Math.max(0, Math.min(list.length - 1, n)); setI(k); if (ref.current) ref.current.scrollTo({ x: k * w, animated: true }); };
+  return (
+    <View style={s.photo} onLayout={(e) => setW(e.nativeEvent.layout.width)}>
+      {w > 0 && (
+        <ScrollView ref={ref} horizontal pagingEnabled showsHorizontalScrollIndicator={false} scrollEventThrottle={16}
+          onScroll={(e) => setI(Math.round(e.nativeEvent.contentOffset.x / w))}>
+          {list.map((u) => <Image key={u} source={{ uri: u }} style={{ width: w, height: 170 }} resizeMode="cover" onError={() => setBad((b) => [...b, u])} />)}
+        </ScrollView>
+      )}
+      {list.length > 1 && <>
+        {i > 0 && <TouchableOpacity style={[s.photoArrow, { left: 8 }]} onPress={() => go(i - 1)}><Text style={s.photoArrowT}>{'\u2039'}</Text></TouchableOpacity>}
+        {i < list.length - 1 && <TouchableOpacity style={[s.photoArrow, { right: 8 }]} onPress={() => go(i + 1)}><Text style={s.photoArrowT}>{'\u203A'}</Text></TouchableOpacity>}
+        <View style={s.photoDots}>{list.map((u, k) => <View key={u} style={[s.photoDot, k === i && s.photoDotOn]} />)}</View>
+      </>}
+    </View>
+  );
+}
+
 function Stay({ l, onDone, onPayment }) {
   const [i, setI] = useState('');
   const [o, setO] = useState('');
@@ -199,6 +224,7 @@ function Stay({ l, onDone, onPayment }) {
   };
   return (
     <Card>
+      <Photo uris={l.photos && l.photos.length ? l.photos : (l.photo ? [l.photo] : [])} />
       <View style={s.row}><Text style={s.bold}>{l.name}</Text><Badge t={l.type} /></View>
       <Text style={s.mu}>{l.location}, Cagayan de Oro</Text>
       <Text style={s.price}>{peso(l.price)} <Text style={s.mu}>per night</Text></Text>
@@ -356,6 +382,7 @@ function HostListings() {
           <ListingForm key={l.id} l={l} onSave={done} onCancel={() => setEditId(null)} />
         ) : (
           <Card key={l.id}>
+            <Photo uris={l.photos && l.photos.length ? l.photos : (l.photo ? [l.photo] : [])} />
             <View style={s.row}><Text style={s.bold}>{l.name}</Text><Badge t={cap(l.status)} k={l.status === 'active' ? 'ok' : ''} /></View>
             <Text style={s.mu}>{l.type} - {l.location}, Cagayan de Oro</Text>
             <Text style={s.mu}>{peso(l.price)} per night - {l.availability}</Text>
@@ -637,6 +664,13 @@ export default function App() {
 }
 
 const s = StyleSheet.create({
+  photo: { width: '100%', height: 170, borderRadius: 8, marginBottom: 10, backgroundColor: '#eee', overflow: 'hidden' },
+  photoArrow: { position: 'absolute', top: 65, width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' },
+  photoArrowT: { color: '#fff', fontSize: 24, lineHeight: 28, fontWeight: '700' },
+  photoDots: { position: 'absolute', bottom: 8, left: 0, right: 0, flexDirection: 'row', justifyContent: 'center', gap: 5 },
+  photoDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.55)' },
+  photoDotOn: { backgroundColor: '#fff' },
+  photoEmpty: { alignItems: 'center', justifyContent: 'center' },
   app: { flex: 1, backgroundColor: '#fff', paddingTop: Platform.OS === 'web' ? 0 : Platform.OS === 'ios' ? 54 : (StatusBar.currentHeight || 24) + 8 },
   desktopApp: { paddingTop: 0, backgroundColor: C.side },
   desktopLayout: { flex: 1, flexDirection: 'row' },
