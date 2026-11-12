@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { View, Text, TextInput, TouchableOpacity, ScrollView, RefreshControl, Alert, Platform, StatusBar, ActivityIndicator, Image, Modal, KeyboardAvoidingView, StyleSheet, useWindowDimensions } from 'react-native';
+import { View, Text, TextInput, Linking, TouchableOpacity, ScrollView, RefreshControl, Alert, Platform, StatusBar, ActivityIndicator, Image, Modal, KeyboardAvoidingView, StyleSheet, useWindowDimensions } from 'react-native';
 import { API } from './config'; // your PC's IP lives in config.js, so updates to this file never erase it
 
 
@@ -182,7 +182,8 @@ function DateField({ label, value, onChange, min, max, clearable, blocked = [] }
 }
 
 function Photo({ uris }) {
-  const [w, setW] = useState(0);
+  const [box, setBox] = useState({ w: 0, h: 0 });
+  const w = box.w, h = box.h;
   const [i, setI] = useState(0);
   const [bad, setBad] = useState([]);
   const ref = React.useRef(null);
@@ -190,11 +191,11 @@ function Photo({ uris }) {
   if (!list.length) return <View style={[s.photo, s.photoEmpty]}><Text style={s.mu}>No photo yet</Text></View>;
   const go = (n) => { const k = Math.max(0, Math.min(list.length - 1, n)); setI(k); if (ref.current) ref.current.scrollTo({ x: k * w, animated: true }); };
   return (
-    <View style={s.photo} onLayout={(e) => setW(e.nativeEvent.layout.width)}>
-      {w > 0 && (
+    <View style={s.photo} onLayout={(e) => setBox({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height })}>
+      {w > 0 && h > 0 && (
         <ScrollView ref={ref} horizontal pagingEnabled showsHorizontalScrollIndicator={false} scrollEventThrottle={16}
           onScroll={(e) => setI(Math.round(e.nativeEvent.contentOffset.x / w))}>
-          {list.map((u) => <Image key={u} source={{ uri: u }} style={{ width: w, height: 170 }} resizeMode="cover" onError={() => setBad((b) => [...b, u])} />)}
+          {list.map((u) => <Image key={u} source={{ uri: u }} style={{ width: w, height: h }} resizeMode="cover" onError={() => setBad((b) => [...b, u])} />)}
         </ScrollView>
       )}
       {list.length > 1 && <>
@@ -246,47 +247,90 @@ function Stays({ onPayment }) {
   );
 }
 function PaymentForm({ booking, onSubmitted }) {
-  const [method, setMethod] = useState('ewallet');
+  const [method, setMethod] = useState('bank_transfer');
   const [reference, setReference] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [waiting, setWaiting] = useState(false);
+  const [other, setOther] = useState(false);
+  const done = React.useRef(onSubmitted);
+  done.current = onSubmitted;
+
+  // Asks the server (which asks HitPay) whether the money has arrived.
+  const check = useCallback(async () => {
+    try {
+      const b = await call(`/bookings/${booking.id}/payment/status`);
+      if (b.payment_status === 'verified') { setWaiting(false); done.current(); }
+    } catch (e) { /* try again on the next tick */ }
+  }, [booking.id]);
+
+  useEffect(() => {
+    if (!waiting) return undefined;
+    const timer = setInterval(check, 4000);
+    const stop = setTimeout(() => setWaiting(false), 10 * 60 * 1000);
+    return () => { clearInterval(timer); clearTimeout(stop); };
+  }, [waiting, check]);
+
+  const payOnline = async () => {
+    setBusy(true); setError('');
+    // On the web, open the tab right away so the browser does not block the pop-up.
+    const win = Platform.OS === 'web' && typeof window !== 'undefined' ? window.open('', '_blank') : null;
+    try {
+      const r = await call(`/bookings/${booking.id}/pay`, 'POST');
+      if (win) win.location.href = r.checkout_url;
+      else if (Platform.OS === 'web') window.location.href = r.checkout_url;
+      else await Linking.openURL(r.checkout_url);
+      setWaiting(true);
+    } catch (e) { if (win) win.close(); setError(e.message); }
+    setBusy(false);
+  };
+
   const submit = async () => {
     setBusy(true); setError('');
     try {
-      await call(`/bookings/${booking.id}/payment`, 'PUT', {
-        payment_method: method,
-        payment_reference: reference.trim() || null,
-      });
+      await call(`/bookings/${booking.id}/payment`, 'PUT', { payment_method: method, payment_reference: reference.trim() || null });
       onSubmitted();
     } catch (e) { setError(e.message); }
     setBusy(false);
   };
+
   return (
     <View style={s.paymentBox}>
       <Text style={s.bold}>Payment</Text>
       <Text style={s.mu}>Total: {peso(booking.total)}</Text>
-      <View style={s.row2}>
-        {[
-          ['ewallet', 'E-wallet'],
-          ['bank_transfer', 'Bank transfer'],
-          ['cash', 'Cash'],
-        ].map(([value, label]) => (
-          <TouchableOpacity key={value} style={[s.chip, method === value && s.chipOn]} onPress={() => setMethod(value)}>
-            <Text style={[s.chipT, method === value && { color: '#fff' }]}>{label}</Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-      {method === 'cash' ? (
-        <Text style={s.mu}>Pay the host in person and request a receipt. The booking stays unapproved until an admin verifies that payment was received.</Text>
-      ) : (
+      <Text style={s.mu}>Pay securely online. Your payment is confirmed automatically - no reference number needed.</Text>
+      {error ? <Text style={s.err}>{error}</Text> : null}
+      <Btn p t={busy ? 'Opening...' : `Pay ${peso(booking.total)} online`} onPress={payOnline} />
+      {waiting && (
+        <View style={s.paymentNotice}>
+          <Text style={s.mu}>Waiting for your payment to be confirmed. This page updates by itself.</Text>
+          <Btn t="I've paid - check now" onPress={check} />
+        </View>
+      )}
+      <TouchableOpacity onPress={() => setOther(!other)}>
+        <Text style={s.mu}>{other ? 'Hide other ways to pay' : 'Other ways to pay (bank transfer or cash)'}</Text>
+      </TouchableOpacity>
+      {other && (
         <>
-          <Text style={s.mu}>Pay using details provided by the host through a verified channel, then enter your transaction reference. Never share your PIN or OTP.</Text>
-          <TextInput style={s.input} placeholder="Transaction reference" value={reference} onChangeText={setReference} />
+          <View style={s.row2}>
+            {[['bank_transfer', 'Bank transfer'], ['cash', 'Cash']].map(([value, label]) => (
+              <TouchableOpacity key={value} style={[s.chip, method === value && s.chipOn]} onPress={() => setMethod(value)}>
+                <Text style={[s.chipT, method === value && { color: '#fff' }]}>{label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          {method === 'cash' ? (
+            <Text style={s.mu}>Pay the host in person and request a receipt. The booking stays unapproved until an admin verifies that payment was received.</Text>
+          ) : (
+            <>
+              <Text style={s.mu}>Pay using details provided by the host through a verified channel, then enter your transaction reference. Never share your PIN or OTP.</Text>
+              <TextInput style={s.input} placeholder="Transaction reference" value={reference} onChangeText={setReference} />
+            </>
+          )}
+          <Text style={s.paymentSafety}>These are verified manually by an admin. Do not send money to unverified accounts.</Text>
+          <Btn t={busy ? 'Submitting...' : 'Submit payment for verification'} onPress={submit} />
         </>
       )}
-      <Text style={s.paymentSafety}>Payment is manually verified. Do not send money to unverified accounts.</Text>
-      {error ? <Text style={s.err}>{error}</Text> : null}
-      <Btn p t={busy ? 'Submitting...' : 'Submit payment for verification'} onPress={submit} />
     </View>
   );
 }
@@ -664,8 +708,8 @@ export default function App() {
 }
 
 const s = StyleSheet.create({
-  photo: { width: '100%', height: 170, borderRadius: 8, marginBottom: 10, backgroundColor: '#eee', overflow: 'hidden' },
-  photoArrow: { position: 'absolute', top: 65, width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' },
+  photo: { width: '100%', maxWidth: 560, aspectRatio: 1.6, alignSelf: 'flex-start', borderRadius: 8, marginBottom: 10, backgroundColor: '#eee', overflow: 'hidden' },
+  photoArrow: { position: 'absolute', top: '50%', marginTop: -18, width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' },
   photoArrowT: { color: '#fff', fontSize: 24, lineHeight: 28, fontWeight: '700' },
   photoDots: { position: 'absolute', bottom: 8, left: 0, right: 0, flexDirection: 'row', justifyContent: 'center', gap: 5 },
   photoDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.55)' },
