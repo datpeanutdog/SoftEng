@@ -1,10 +1,20 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { View, Text, TextInput, Linking, TouchableOpacity, ScrollView, RefreshControl, Alert, Platform, StatusBar, ActivityIndicator, Image, Modal, KeyboardAvoidingView, StyleSheet, useWindowDimensions } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import { API } from './config'; // your PC's IP lives in config.js, so updates to this file never erase it
 
 
 const C = { brand: '#e11d5a', line: '#dcdcdc', mu: '#6b6b6b', tx: '#222', side: '#f7f7f7' };
+const LANDMARK_IMAGE = require('./backend/public/images/cdo-gaston-park-city-hall.jpg');
+const LANDMARK_SOURCE_URL = 'https://commons.wikimedia.org/wiki/File:Gaston_Park,_Gaerlan-Capistrano_WB,_CDO_City_Hall,_CDO_River_drone_(Cagayan_De_Oro_City;_03-19-2026).jpg';
+const LANDMARK_LICENSE_URL = 'https://creativecommons.org/licenses/by-sa/4.0/';
 let TOKEN = null;
+
+function photoUri(uri) {
+  if (!uri) return uri;
+  const apiOrigin = API.replace(/\/api\/?$/, '');
+  return uri.replace(/^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?/i, apiOrigin);
+}
 
 async function call(path, method = 'GET', body) {
   let res;
@@ -24,6 +34,28 @@ async function call(path, method = 'GET', body) {
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error((data.errors && Object.values(data.errors)[0][0]) || data.message || 'Something went wrong.');
+  return data;
+}
+
+async function uploadPhoto(path, asset) {
+  const form = new FormData();
+  if (Platform.OS === 'web') {
+    const file = asset.file || await fetch(asset.uri).then((response) => response.blob());
+    form.append('photo', file, asset.fileName || 'listing-photo.jpg');
+  } else {
+    form.append('photo', {
+      uri: asset.uri,
+      name: asset.fileName || 'listing-photo.jpg',
+      type: asset.mimeType || 'image/jpeg',
+    });
+  }
+  const res = await fetch(API + path, {
+    method: 'POST',
+    headers: { Accept: 'application/json', ...(TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {}) },
+    body: form,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((data.errors && Object.values(data.errors)[0][0]) || data.message || 'Could not upload photo.');
   return data;
 }
 
@@ -181,21 +213,26 @@ function DateField({ label, value, onChange, min, max, clearable, blocked = [] }
   );
 }
 
-function Photo({ uris }) {
+function Photo({ uris, compact = false }) {
   const [box, setBox] = useState({ w: 0, h: 0 });
   const w = box.w, h = box.h;
   const [i, setI] = useState(0);
   const [bad, setBad] = useState([]);
   const ref = React.useRef(null);
   const list = (uris || []).filter((u) => u && !bad.includes(u));
-  if (!list.length) return <View style={[s.photo, s.photoEmpty]}><Text style={s.mu}>No photo yet</Text></View>;
+  if (!list.length) return (
+    <View style={[s.photo, compact && s.photoCompact, s.photoEmpty, compact && s.photoPlaceholder]}>
+      <Text style={compact ? s.photoPlaceholderIcon : s.mu}>{compact ? '\uD83C\uDFE8' : 'No photo yet'}</Text>
+      {compact ? <Text style={s.photoPlaceholderText}>Stay photo coming soon</Text> : null}
+    </View>
+  );
   const go = (n) => { const k = Math.max(0, Math.min(list.length - 1, n)); setI(k); if (ref.current) ref.current.scrollTo({ x: k * w, animated: true }); };
   return (
-    <View style={s.photo} onLayout={(e) => setBox({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height })}>
+    <View style={[s.photo, compact && s.photoCompact]} onLayout={(e) => setBox({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height })}>
       {w > 0 && h > 0 && (
         <ScrollView ref={ref} horizontal pagingEnabled showsHorizontalScrollIndicator={false} scrollEventThrottle={16}
           onScroll={(e) => setI(Math.round(e.nativeEvent.contentOffset.x / w))}>
-          {list.map((u) => <Image key={u} source={{ uri: u }} style={{ width: w, height: h }} resizeMode="cover" onError={() => setBad((b) => [...b, u])} />)}
+          {list.map((u) => <Image key={u} source={{ uri: photoUri(u) }} style={{ width: w, height: h }} resizeMode="cover" onError={() => setBad((b) => [...b, u])} />)}
         </ScrollView>
       )}
       {list.length > 1 && <>
@@ -207,7 +244,30 @@ function Photo({ uris }) {
   );
 }
 
-function Stay({ l, onDone, onPayment }) {
+function StayTile({ l, width, onPress }) {
+  return (
+    <TouchableOpacity style={[s.stayTile, { width }]} activeOpacity={0.85} onPress={onPress} accessibilityRole="button">
+      <View style={s.tileImageWrap}>
+        <Photo uris={l.photos && l.photos.length ? l.photos : (l.photo ? [l.photo] : [])} compact />
+        {l.featured ? <View style={s.tileFeatured}><Text style={s.tileFeaturedText}>Featured</Text></View> : null}
+      </View>
+      <View style={s.tileInfo}>
+        <View style={s.tileTitleRow}>
+          <Text style={s.tileTitle} numberOfLines={1}>{l.name}</Text>
+          {l.star_rating ? <Text style={s.tileStars}>{'\u2605'} {l.star_rating}-star</Text> : null}
+        </View>
+        <Text style={s.tileLocation} numberOfLines={1}>{l.location}</Text>
+        <View style={s.tileAmenityRow}>
+          {l.serves_breakfast ? <Text style={s.tileAmenity}>{'\u2615'} Breakfast</Text> : null}
+          {l.has_pool ? <Text style={s.tileAmenity}>{'\u2248'} Pool</Text> : null}
+        </View>
+        <Text style={s.tilePrice}>{peso(l.price)} <Text style={s.tilePerNight}>/ night</Text></Text>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
+function Stay({ l, onBack, onDone, onPayment }) {
   const [i, setI] = useState('');
   const [o, setO] = useState('');
   const [requested, setRequested] = useState(false);
@@ -217,32 +277,96 @@ function Stay({ l, onDone, onPayment }) {
   const booked = l.booked || [];
   const nextStart = i ? booked.map((b) => b[0]).filter((a) => a >= i).sort()[0] : undefined; // next booking after your check-in
   const maxOut = [l.available_to, nextStart].filter(Boolean).sort()[0];
+  const nights = i && o ? Math.round((parseD(o) - parseD(i)) / 86400000) : 0;
   const go = async () => {
+    if (!i || !o) {
+      Alert.alert('Choose your dates', 'Select check-in and check-out dates before requesting a booking.');
+      return;
+    }
     try {
-      const d = await call('/bookings', 'POST', { listing_id: l.id, check_in: i, check_out: o });
+      await call('/bookings', 'POST', { listing_id: l.id, check_in: i, check_out: o });
       setI(''); setO(''); setRequested(true); onDone();
     } catch (e) { Alert.alert('Could not send request', e.message); }
   };
   return (
-    <Card>
-      <Photo uris={l.photos && l.photos.length ? l.photos : (l.photo ? [l.photo] : [])} />
-      <View style={s.row}><Text style={s.bold}>{l.name}</Text><Badge t={l.type} /></View>
-      <Text style={s.mu}>{l.location}, Cagayan de Oro</Text>
-      <Text style={s.price}>{peso(l.price)} <Text style={s.mu}>per night</Text></Text>
-      <Text style={s.mu}>Available: {l.availability}</Text>
-      <DateField label="Check-in date" value={i} min={minIn} max={l.available_to || undefined} blocked={booked} onChange={(v) => { setI(v); setO(''); }} />
-      <DateField label="Check-out date" value={o} min={minOut} max={maxOut} onChange={setO} />
-      {nextStart ? <Text style={s.mu}>Latest check-out: {pretty(maxOut)} (next booking starts then)</Text> : null}
-      <Btn p t="Request booking" onPress={go} />
-      {requested && <View style={s.paymentNotice}><Text style={s.paymentNoticeText}>Booking request sent. Submit payment from My bookings so it can be reviewed.</Text><Btn t="Go to My bookings" onPress={onPayment} /></View>}
-    </Card>
+    <View>
+      <View style={s.row2}><Btn t="Back to hotels" onPress={onBack} /></View>
+      <Card>
+        <Photo uris={l.photos && l.photos.length ? l.photos : (l.photo ? [l.photo] : [])} />
+        <View style={s.row}><Text style={s.detailTitle}>{l.name}</Text><Badge t={l.type} /></View>
+        <Text style={s.detailLocation}>{l.location}, Cagayan de Oro</Text>
+        <View style={s.row2}>
+          {l.featured ? <Badge t="Featured" k="ok" /> : null}
+          {l.star_rating ? <Badge t={`${l.star_rating}-star`} /> : null}
+          {l.serves_breakfast ? <Badge t="Breakfast available" /> : null}
+          {l.has_pool ? <Badge t="Swimming pool" /> : null}
+        </View>
+        <Text style={s.price}>{peso(l.price)} <Text style={s.mu}>per night</Text></Text>
+        <Text style={s.mu}>Available: {l.availability}</Text>
+        <View style={s.bookingDetails}>
+          <Text style={s.bold}>Booking details</Text>
+          <Text style={s.mu}>Check-in: 2:00 PM</Text>
+          <Text style={s.mu}>Check-out: 11:00 AM</Text>
+          <DateField label="Check-in date" value={i} min={minIn} max={l.available_to || undefined} blocked={booked} onChange={(v) => { setI(v); setO(''); }} />
+          <DateField label="Check-out date" value={o} min={minOut} max={maxOut} onChange={setO} />
+          {nextStart ? <Text style={s.mu}>Latest check-out: {pretty(maxOut)} (next booking starts then)</Text> : null}
+          {nights > 0 ? <Text style={s.estimate}>Estimated total: {peso(l.price * nights)} for {nights} {nights === 1 ? 'night' : 'nights'}</Text> : null}
+        </View>
+        <Btn p t="Request booking" onPress={go} />
+        {requested && <View style={s.paymentNotice}><Text style={s.paymentNoticeText}>Booking request sent. Submit payment from My bookings so it can be reviewed.</Text><Btn t="Go to My bookings" onPress={onPayment} /></View>}
+      </Card>
+    </View>
   );
 }
+
+const STAY_FILTERS = [
+  { label: 'All stays', icon: '\u25C7' },
+  { label: 'Hotels', icon: '\u2302' },
+  { label: 'Featured', icon: '\u2728' },
+  { label: '5-star', icon: '\u2605' },
+  { label: 'Breakfast', icon: '\u2615' },
+  { label: 'Pools', icon: '\u2248' },
+];
+
 function Stays({ onPayment }) {
   const h = useLoad('/listings');
+  const [filter, setFilter] = useState('All stays');
+  const [selectedId, setSelectedId] = useState(null);
+  const { width } = useWindowDimensions();
+  const columns = width >= 1200 ? 4 : width >= 760 ? 3 : 2;
+  const tileWidth = columns === 4 ? '23%' : columns === 3 ? '31%' : '47%';
+  const matches = (listing) => {
+    if (filter === 'Hotels') return listing.type === 'Hotel';
+    if (filter === 'Featured') return listing.featured;
+    if (filter === '5-star') return listing.star_rating === 5;
+    if (filter === 'Breakfast') return listing.serves_breakfast;
+    if (filter === 'Pools') return listing.has_pool;
+    return true;
+  };
+  const listings = h.data ? h.data[0].filter(matches).sort((a, b) => Number(b.featured) - Number(a.featured)) : [];
+  const selected = listings.find((listing) => listing.id === selectedId);
   return (
-    <Page title="Find a stay" sub="Check-in 2:00 PM, check-out 11:00 AM." hook={h}>
-      {h.data && (h.data[0].length ? h.data[0].map((l) => <Stay key={l.id} l={l} onDone={h.silent} onPayment={onPayment} />) : <Empty t="No listings are open right now." />)}
+    <Page key={selected ? `stay-${selected.id}` : 'stay-grid'} title={selected ? 'Hotel details' : 'Find a stay'} sub={selected ? 'Review the details and choose your dates.' : 'Hotels and stays in Cagayan de Oro.'} hook={h}>
+      {h.data && (selected
+        ? <Stay key={selected.id} l={selected} onBack={() => setSelectedId(null)} onDone={h.silent} onPayment={onPayment} />
+        : <>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.categoryRail}>
+            {STAY_FILTERS.map((item) => {
+              const active = filter === item.label;
+              return (
+                <TouchableOpacity key={item.label} style={[s.categoryTab, active && s.categoryTabOn]} onPress={() => setFilter(item.label)} accessibilityRole="tab" accessibilityState={{ selected: active }}>
+                  <Text style={[s.categoryIcon, active && s.categoryIconOn]}>{item.icon}</Text>
+                  <Text style={[s.categoryLabel, active && s.categoryLabelOn]}>{item.label}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+          {listings.length
+            ? <View style={s.stayGrid}>
+              {listings.map((l) => <StayTile key={l.id} l={l} width={tileWidth} onPress={() => setSelectedId(l.id)} />)}
+            </View>
+            : <Empty t={filter === 'All stays' ? 'No listings are open right now.' : `No listings match the ${filter} category yet.`} />}
+        </>)}
     </Page>
   );
 }
@@ -381,13 +505,50 @@ function ListingForm({ l, onSave, onCancel }) {
   const [from, setFrom] = useState(l && l.available_from ? l.available_from : '');
   const [to, setTo] = useState(l && l.available_to ? l.available_to : '');
   const [status, setStatus] = useState(l ? l.status : 'active');
+  const [photo, setPhoto] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const choosePhoto = async () => {
+    try {
+      if (Platform.OS !== 'web') {
+        const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (!permission.granted) {
+          Alert.alert('Photo access needed', 'Allow photo library access to choose a listing photo.');
+          return;
+        }
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsEditing: true,
+        quality: 0.8,
+      });
+      if (!result.canceled) setPhoto(result.assets[0]);
+    } catch (e) {
+      Alert.alert('Could not choose photo', e.message);
+    }
+  };
   const save = async () => {
+    if (saving) return;
+    setSaving(true);
     try {
       const body = { name, type, location, price: parseInt(price, 10), available_from: from || null, available_to: to || null, status };
-      if (l) await call(`/host/listings/${l.id}`, 'PUT', body); else await call('/host/listings', 'POST', body);
+      const saved = l ? await call(`/host/listings/${l.id}`, 'PUT', body) : await call('/host/listings', 'POST', body);
+      if (photo) {
+        try {
+          await uploadPhoto(`/host/listings/${saved.id}/photo`, photo);
+        } catch (e) {
+          Alert.alert('Listing saved, but photo upload failed', e.message);
+          onSave();
+          return;
+        }
+      }
       onSave();
-    } catch (e) { Alert.alert('Could not save listing', e.message); }
+    } catch (e) {
+      Alert.alert('Could not save listing', e.message);
+    } finally {
+      setSaving(false);
+    }
   };
+  const previewUri = photo ? photo.uri : l && l.photo ? photoUri(l.photo) : null;
   return (
     <Card>
       <Text style={s.bold}>{l ? 'Edit listing' : 'Add listing'}</Text>
@@ -404,10 +565,13 @@ function ListingForm({ l, onSave, onCancel }) {
       <TextInput style={s.input} placeholder="Price per night (PHP)" value={price} onChangeText={setPrice} keyboardType="number-pad" />
       <DateField label="Available from (optional)" value={from} onChange={setFrom} clearable />
       <DateField label="Available until (optional)" value={to} min={from || undefined} onChange={setTo} clearable />
+      {previewUri ? <Image source={{ uri: previewUri }} style={s.photo} resizeMode="cover" /> : null}
+      <View style={s.row2}><Btn t={photo || (l && l.photo) ? 'Choose or change photo' : 'Add photo'} onPress={choosePhoto} /></View>
+      <Text style={s.mu}>JPG, PNG, or WebP; up to 5 MB.</Text>
       <View style={s.row2}>
         <Btn t={status === 'active' ? 'Status: Active (tap to pause)' : 'Status: Paused (tap to activate)'} onPress={() => setStatus(status === 'active' ? 'paused' : 'active')} />
       </View>
-      <View style={s.row2}><Btn p t={l ? 'Save changes' : 'Add listing'} onPress={save} /><Btn t="Cancel" onPress={onCancel} /></View>
+      <View style={s.row2}><Btn p t={saving ? (photo ? 'Saving & uploading…' : 'Saving…') : l ? 'Save changes' : 'Add listing'} onPress={save} /><Btn t="Cancel" onPress={onCancel} /></View>
     </Card>
   );
 }
@@ -579,7 +743,11 @@ function Users() {
 
 // ---------- Login / register + shell ----------
 function Login({ onDone, desktop }) {
-  const [reg, setReg] = useState(false);
+  const { width } = useWindowDimensions();
+  const compactHeader = Platform.OS !== 'web' || width < 720;
+  const [page, setPage] = useState('home');
+  const [authMode, setAuthMode] = useState(null);
+  const reg = authMode === 'register';
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
@@ -601,36 +769,132 @@ function Login({ onDone, desktop }) {
     } catch (e) { setErr(e.message); }
     setBusy(false);
   };
+  const chooseMode = (register) => {
+    setAuthMode(register ? 'register' : 'login');
+    setErr('');
+  };
+  const showHome = () => {
+    setPage('home');
+    setAuthMode(null);
+    setErr('');
+  };
+  const showInfo = () => {
+    setPage('info');
+    setAuthMode(null);
+    setErr('');
+  };
+  const story = page === 'info'
+    ? {
+      eyebrow: 'ABOUT LOCKBAY',
+      title: 'A clear, convenient way to book local stays.',
+      description: 'LockBay is a Cagayan de Oro hotel discovery and booking-request app. Browse local listings, compare amenities and prices, choose your dates, and keep track of your requests in one place.',
+      points: ['Browse local stays and amenities', 'Compare prices and availability', 'Track your booking requests'],
+    }
+    : {
+      eyebrow: 'A SMARTER WAY TO STAY',
+      title: 'Your stay in Cagayan de Oro.',
+      description: 'Browse local hotels, compare amenities, and check your dates before sending a booking request.',
+      points: ['Explore local stays', 'Choose your dates', 'Request your booking'],
+    };
   return (
-    <KeyboardAvoidingView style={[s.app, desktop && s.loginDesktopApp]} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-      <ScrollView contentContainerStyle={[s.loginWrap, desktop && s.loginDesktopWrap]} keyboardShouldPersistTaps="handled">
-        <View style={s.loginBrandRow}><Logo size={48} /><Text style={s.loginBrand}>LockBay</Text></View>
-        <Text style={s.loginTag}>Smart check-in for stays in Cagayan de Oro</Text>
-        <View style={[s.loginCard, desktop && s.loginDesktopCard]}>
-          <Text style={s.h1}>{reg ? 'Create your account' : 'Welcome back'}</Text>
-          <Text style={s.sub}>{reg ? 'Sign up as a guest to book your stay.' : 'Log in to continue.'}</Text>
-          {err ? <Text style={s.err}>{err}</Text> : null}
-          {reg && <>
-            <Text style={s.label}>Full name</Text>
-            <TextInput style={s.input} value={name} onChangeText={setName} autoComplete="name" />
-            <Text style={s.label}>Philippine mobile number</Text>
-            <View style={s.phoneRow}>
-              <Text style={s.phonePrefix}>+63</Text>
-              <TextInput style={[s.input, s.phoneInput]} value={phone} onChangeText={(value) => setPhone(value.replace(/\D/g, '').slice(0, 10))} keyboardType="phone-pad" autoComplete="tel" placeholder="9XX XXX XXXX" maxLength={10} />
+    <KeyboardAvoidingView style={[s.app, s.landingApp]} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <ScrollView contentContainerStyle={[s.landingScroll, !desktop && s.landingScrollMobile]} keyboardShouldPersistTaps="handled">
+        <View style={s.landingShell}>
+        <View style={[s.landingHeader, compactHeader && s.landingHeaderMobile]}>
+          <View style={s.landingBrand}>
+            <Logo size={38} />
+            <View>
+              <Text style={s.landingBrandName}>LockBay</Text>
+              <Text style={s.landingBrandTag}>STAYS IN CAGAYAN DE ORO</Text>
             </View>
-          </>}
-          <Text style={s.label}>Email</Text>
-          <TextInput style={s.input} value={email} onChangeText={setEmail} autoCapitalize="none" keyboardType="email-address" autoComplete="email" />
-          <Text style={s.label}>Password</Text>
-          <View style={s.pwRow}>
-            <TextInput style={[s.input, { flex: 1, marginVertical: 0, borderWidth: 0 }]} value={pw} onChangeText={setPw} secureTextEntry={!show} autoCapitalize="none" autoComplete="password" />
-            <TouchableOpacity onPress={() => setShow(!show)}><Text style={s.link}>{show ? 'Hide' : 'Show'}</Text></TouchableOpacity>
           </View>
-          <View style={{ height: 14 }} />
-          <Btn p t={busy ? 'Please wait...' : reg ? 'Create account' : 'Log in'} onPress={go} />
-          <TouchableOpacity onPress={() => { setReg(!reg); setErr(''); }} style={{ marginTop: 16, alignItems: 'center' }}>
-            <Text style={s.mu}>{reg ? 'Already have an account? ' : 'New here? '}<Text style={s.link}>{reg ? 'Log in' : 'Create an account'}</Text></Text>
-          </TouchableOpacity>
+          <View style={[s.landingNav, compactHeader && s.landingNavMobile]}>
+            <TouchableOpacity style={[s.landingNavButton, compactHeader && s.landingNavButtonMobile, page === 'home' && !authMode && s.landingNavActive]} onPress={showHome} accessibilityRole="button">
+              <Text style={[s.landingNavText, page === 'home' && !authMode && s.landingNavTextActive]}>Home</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[s.landingNavButton, compactHeader && s.landingNavButtonMobile, page === 'info' && !authMode && s.landingNavActive]} onPress={showInfo} accessibilityRole="button">
+              <Text style={[s.landingNavText, page === 'info' && !authMode && s.landingNavTextActive]}>Info</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[s.landingNavButton, compactHeader && s.landingNavButtonMobile, authMode === 'login' && s.landingNavActive]} onPress={() => chooseMode(false)} accessibilityRole="button">
+              <Text style={[s.landingNavText, authMode === 'login' && s.landingNavTextActive]}>Log in</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[s.landingNavButton, compactHeader && s.landingNavButtonMobile, authMode === 'register' && s.landingNavActive]} onPress={() => chooseMode(true)} accessibilityRole="button">
+              <Text style={[s.landingNavText, authMode === 'register' && s.landingNavTextActive]}>Create account</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        <View style={[s.landingHero, desktop && s.landingHeroDesktop, desktop && !authMode && s.landingHeroSoloDesktop]}>
+          <Image source={LANDMARK_IMAGE} style={s.landingHeroImage} resizeMode="cover" />
+          <View style={s.landingHeroShade} />
+          <View style={[s.landingStoryPanel, desktop && s.landingStoryPanelDesktop]}>
+            <Text style={s.landingEyebrow}>{story.eyebrow}</Text>
+            <Text style={[s.landingTitle, desktop && s.landingTitleDesktop]}>{story.title}</Text>
+            <Text style={s.landingDescription}>{story.description}</Text>
+            <View style={s.landingPoints}>
+              {story.points.map((point, index) => (
+                <View style={s.landingPoint} key={point}>
+                  <Text style={s.landingPointNumber}>0{index + 1}</Text>
+                  <Text style={s.landingPointText}>{point}</Text>
+                </View>
+              ))}
+            </View>
+            {!authMode && <View style={s.landingIntroActions}>
+              <TouchableOpacity onPress={() => chooseMode(true)} accessibilityRole="button">
+                <Text style={s.landingIntroActionPrimary}>Create an account</Text>
+              </TouchableOpacity>
+              {page === 'home' && <TouchableOpacity onPress={showInfo} accessibilityRole="button">
+                <Text style={s.landingIntroActionSecondary}>Learn about LockBay</Text>
+              </TouchableOpacity>}
+            </View>}
+            {authMode && <TouchableOpacity onPress={showHome} accessibilityRole="button" style={s.landingBackLink}>
+              <Text style={s.landingBackLinkText}>Back to home</Text>
+            </TouchableOpacity>}
+          </View>
+
+          {authMode && <View style={[s.loginCard, s.landingAuthCard, !desktop && s.landingAuthCardMobile]}>
+            <Text style={s.authEyebrow}>{reg ? 'START PLANNING YOUR STAY' : 'WELCOME TO LOCKBAY'}</Text>
+            <Text style={s.authTitle}>{reg ? 'Create your account' : 'Welcome back'}</Text>
+            <Text style={s.authDescription}>{reg ? 'Sign up as a guest to book your stay.' : 'Log in to find your next stay.'}</Text>
+            {err ? <Text style={s.err}>{err}</Text> : null}
+            {reg && <>
+              <Text style={s.label}>Full name</Text>
+              <TextInput style={s.input} value={name} onChangeText={setName} autoComplete="name" />
+              <Text style={s.label}>Philippine mobile number</Text>
+              <View style={s.phoneRow}>
+                <Text style={s.phonePrefix}>+63</Text>
+                <TextInput style={[s.input, s.phoneInput]} value={phone} onChangeText={(value) => setPhone(value.replace(/\D/g, '').slice(0, 10))} keyboardType="phone-pad" autoComplete="tel" placeholder="9XX XXX XXXX" maxLength={10} />
+              </View>
+            </>}
+            <Text style={s.label}>Email</Text>
+            <TextInput style={s.input} value={email} onChangeText={setEmail} autoCapitalize="none" keyboardType="email-address" autoComplete="email" />
+            <Text style={s.label}>Password</Text>
+            <View style={s.pwRow}>
+              <TextInput style={[s.input, { flex: 1, marginVertical: 0, borderWidth: 0 }]} value={pw} onChangeText={setPw} secureTextEntry={!show} autoCapitalize="none" autoComplete="password" />
+              <TouchableOpacity onPress={() => setShow(!show)}><Text style={s.link}>{show ? 'Hide' : 'Show'}</Text></TouchableOpacity>
+            </View>
+            <View style={{ height: 14 }} />
+            <Btn p t={busy ? 'Please wait...' : reg ? 'Create account' : 'Log in'} onPress={go} />
+            <TouchableOpacity onPress={() => chooseMode(!reg)} style={s.authModeSwitch}>
+              <Text style={s.mu}>{reg ? 'Already have an account? ' : 'New to LockBay? '}<Text style={s.link}>{reg ? 'Log in' : 'Create an account'}</Text></Text>
+            </TouchableOpacity>
+          </View>}
+          <View style={s.landingPhotoCredit}>
+            <Text style={s.landingPhotoCreditText}>Gaston Park & City Hall · Photo: Patrick Roque · </Text>
+            <TouchableOpacity onPress={() => Linking.openURL(LANDMARK_SOURCE_URL)} accessibilityRole="link">
+              <Text style={s.landingPhotoCreditLink}>Wikimedia Commons</Text>
+            </TouchableOpacity>
+            <Text style={s.landingPhotoCreditText}> · </Text>
+            <TouchableOpacity onPress={() => Linking.openURL(LANDMARK_LICENSE_URL)} accessibilityRole="link">
+              <Text style={s.landingPhotoCreditLink}>CC BY-SA 4.0</Text>
+            </TouchableOpacity>
+            <Text style={s.landingPhotoCreditText}> · Cropped</Text>
+          </View>
+        </View>
+        <View style={[s.landingFooter, !desktop && s.landingFooterMobile]}>
+          <Text style={s.landingFooterTitle}>Your CDO stay, made simpler.</Text>
+          <Text style={s.landingFooterText}>See stay details, compare nightly prices, and check availability before you request a booking.</Text>
+        </View>
         </View>
       </ScrollView>
     </KeyboardAvoidingView>
@@ -709,6 +973,10 @@ export default function App() {
 
 const s = StyleSheet.create({
   photo: { width: '100%', maxWidth: 560, aspectRatio: 1.6, alignSelf: 'flex-start', borderRadius: 8, marginBottom: 10, backgroundColor: '#eee', overflow: 'hidden' },
+  photoCompact: { maxWidth: '100%', aspectRatio: 1.15, alignSelf: 'stretch', borderRadius: 12, marginBottom: 0 },
+  photoPlaceholder: { backgroundColor: '#f3f2f0' },
+  photoPlaceholderIcon: { fontSize: 34, marginBottom: 5 },
+  photoPlaceholderText: { color: C.mu, fontSize: 11 },
   photoArrow: { position: 'absolute', top: '50%', marginTop: -18, width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' },
   photoArrowT: { color: '#fff', fontSize: 24, lineHeight: 28, fontWeight: '700' },
   photoDots: { position: 'absolute', bottom: 8, left: 0, right: 0, flexDirection: 'row', justifyContent: 'center', gap: 5 },
@@ -721,8 +989,8 @@ const s = StyleSheet.create({
   sidebar: { width: 252, backgroundColor: '#fff', borderRightWidth: 1, borderRightColor: C.line, paddingHorizontal: 22, paddingTop: 28, paddingBottom: 20 },
   sidebarLabel: { color: C.mu, fontSize: 11, fontWeight: '700', letterSpacing: 1.2, marginTop: 48, marginBottom: 12 },
   desktopNav: { gap: 5 },
-  desktopNavI: { borderRadius: 10, paddingHorizontal: 13, paddingVertical: 12 },
-  desktopNavOn: { backgroundColor: '#f2f2f2' },
+  desktopNavI: { borderWidth: 1, borderColor: C.line, borderRadius: 10, paddingHorizontal: 13, paddingVertical: 12, backgroundColor: '#fff' },
+  desktopNavOn: { backgroundColor: '#f2f2f2', borderColor: '#222' },
   desktopNavT: { color: C.mu, fontSize: 14, fontWeight: '500' },
   desktopNavTOn: { color: C.tx, fontWeight: '700' },
   sidebarAccount: { marginTop: 'auto', borderTopWidth: 1, borderTopColor: C.line, paddingTop: 18 },
@@ -749,6 +1017,31 @@ const s = StyleSheet.create({
   err: { backgroundColor: '#fde8e4', color: '#c2321b', padding: 10, borderRadius: 10, marginBottom: 12, overflow: 'hidden' },
   empty: { color: C.mu, borderWidth: 1, borderColor: C.line, borderRadius: 12, padding: 18 },
   card: { borderWidth: 1, borderColor: C.line, borderRadius: 14, padding: 15, marginBottom: 12, gap: 6 },
+  categoryRail: { flexGrow: 0, marginBottom: 18 },
+  categoryTab: { minWidth: 76, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 10, paddingVertical: 8, marginRight: 12, marginBottom: 4, borderWidth: 1, borderColor: C.line, borderRadius: 10, backgroundColor: '#fff' },
+  categoryTabOn: { borderColor: C.tx, backgroundColor: C.side },
+  categoryIcon: { color: C.mu, fontSize: 20, marginBottom: 4 },
+  categoryIconOn: { color: C.tx },
+  categoryLabel: { color: C.mu, fontSize: 12, fontWeight: '600' },
+  categoryLabelOn: { color: C.tx },
+  stayGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 18 },
+  stayTile: { marginBottom: 2, borderWidth: 1, borderColor: C.line, borderRadius: 14, backgroundColor: '#fff', overflow: 'hidden' },
+  tileImageWrap: { position: 'relative' },
+  tileInfo: { padding: 10, gap: 3 },
+  tileTitleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 4 },
+  tileTitle: { flex: 1, color: C.tx, fontSize: 14, fontWeight: '700' },
+  tileStars: { color: C.tx, fontSize: 11, fontWeight: '600' },
+  tileLocation: { color: C.mu, fontSize: 12 },
+  tileAmenityRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 2 },
+  tileAmenity: { color: C.mu, fontSize: 11 },
+  tilePrice: { color: C.tx, fontSize: 14, fontWeight: '700', marginTop: 3 },
+  tilePerNight: { color: C.mu, fontSize: 12, fontWeight: '400' },
+  tileFeatured: { position: 'absolute', top: 8, left: 8, backgroundColor: '#fff', borderRadius: 99, paddingHorizontal: 10, paddingVertical: 4 },
+  tileFeaturedText: { color: C.tx, fontSize: 11, fontWeight: '700' },
+  detailTitle: { flex: 1, color: C.tx, fontSize: 21, fontWeight: '700' },
+  detailLocation: { color: C.mu, fontSize: 14 },
+  bookingDetails: { borderTopWidth: 1, borderTopColor: C.line, paddingTop: 12, marginTop: 6, gap: 5 },
+  estimate: { color: C.tx, fontSize: 15, fontWeight: '700', marginTop: 4 },
   row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 8 },
   row2: { flexDirection: 'row', gap: 8, marginTop: 8, flexWrap: 'wrap' },
   badge: { paddingHorizontal: 12, paddingVertical: 4, borderRadius: 99 },
@@ -766,8 +1059,8 @@ const s = StyleSheet.create({
   paymentSafety: { color: '#8a5a00', fontSize: 12 },
   refundNotice: { color: '#c2321b', fontSize: 13, fontWeight: '600' },
   nav: { position: 'absolute', left: 21, right: 21, bottom: 22, flexDirection: 'row', backgroundColor: C.side, borderWidth: 1, borderColor: C.line, borderRadius: 16, padding: 6, gap: 4 },
-  navI: { flex: 1, alignItems: 'center', paddingVertical: 10, borderRadius: 10 },
-  navOn: { backgroundColor: '#ececec' },
+  navI: { flex: 1, alignItems: 'center', paddingVertical: 10, borderRadius: 10, borderWidth: 1, borderColor: C.line, backgroundColor: '#fff' },
+  navOn: { backgroundColor: '#ececec', borderColor: '#222' },
   navT: { color: C.mu, fontSize: 14 },
   bold2: { fontWeight: '600', fontSize: 16, color: C.tx },
   overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'center', padding: 24 },
@@ -784,18 +1077,60 @@ const s = StyleSheet.create({
   chip: { borderWidth: 1, borderColor: C.line, borderRadius: 99, paddingHorizontal: 14, paddingVertical: 8, marginRight: 8 },
   chipOn: { backgroundColor: '#222', borderColor: '#222' },
   chipT: { color: C.tx, fontWeight: '600', fontSize: 13 },
-  loginWrap: { flexGrow: 1, justifyContent: 'center', padding: 24 },
-  loginDesktopApp: { backgroundColor: C.side },
-  loginDesktopWrap: { alignItems: 'center', paddingVertical: 48 },
-  loginDesktopCard: { width: '100%', maxWidth: 460, backgroundColor: '#fff' },
+  landingApp: { backgroundColor: '#f1f0ed' },
+  landingScroll: { flexGrow: 1, width: '100%', maxWidth: 1480, alignSelf: 'center', paddingHorizontal: 24, paddingTop: 22, paddingBottom: 24 },
+  landingScrollMobile: { paddingHorizontal: 14, paddingTop: 14 },
+  landingShell: { backgroundColor: 'transparent' },
+  landingHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#17191c', borderRadius: 14, paddingHorizontal: 22, paddingVertical: 14, marginBottom: 18 },
+  landingHeaderMobile: { flexDirection: 'column', alignItems: 'stretch', gap: 12, paddingHorizontal: 16 },
+  landingBrand: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  landingBrandName: { color: '#fff', fontSize: 20, fontWeight: '800' },
+  landingBrandTag: { color: '#c4c6c8', fontSize: 9, fontWeight: '700', letterSpacing: 1, marginTop: 2 },
+  landingNav: { flexDirection: 'row', gap: 10 },
+  landingNavMobile: { width: '100%', flexWrap: 'wrap' },
+  landingNavButton: { paddingHorizontal: 16, paddingVertical: 10, borderWidth: 1, borderColor: '#55595e', borderRadius: 8 },
+  landingNavButtonMobile: { flexGrow: 1, flexBasis: '45%', alignItems: 'center' },
+  landingNavActive: { backgroundColor: C.brand, borderColor: C.brand },
+  landingNavText: { color: '#fff', fontSize: 13, fontWeight: '700' },
+  landingNavTextActive: { color: '#fff' },
+  landingHero: { position: 'relative', justifyContent: 'center', padding: 22, gap: 24, borderRadius: 20, overflow: 'hidden', backgroundColor: '#20282d' },
+  landingHeroDesktop: { flexDirection: 'row', alignItems: 'center', minHeight: 626, padding: 44, gap: 48 },
+  landingHeroSoloDesktop: { justifyContent: 'flex-start' },
+  landingHeroImage: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, width: '100%', height: '100%' },
+  landingHeroShade: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, backgroundColor: 'rgba(10,18,23,0.62)' },
+  landingStoryPanel: { position: 'relative', zIndex: 1, maxWidth: 570, paddingVertical: 24 },
+  landingStoryPanelDesktop: { flex: 1 },
+  landingEyebrow: { color: '#ffd4df', fontSize: 11, fontWeight: '800', letterSpacing: 1.6 },
+  landingTitle: { color: '#fff', fontSize: 32, fontWeight: '800', lineHeight: 39, marginTop: 12, marginBottom: 10 },
+  landingTitleDesktop: { fontSize: 48, lineHeight: 56 },
+  landingDescription: { color: '#e5e8e9', fontSize: 15, lineHeight: 23, maxWidth: 510 },
+  landingPoints: { marginTop: 24, gap: 12 },
+  landingPoint: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  landingPointNumber: { width: 32, height: 32, borderWidth: 1, borderColor: 'rgba(255,255,255,0.55)', borderRadius: 16, color: '#fff', textAlign: 'center', lineHeight: 30, fontSize: 11, fontWeight: '800' },
+  landingPointText: { color: '#fff', fontSize: 14, fontWeight: '600' },
+  landingIntroActions: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 16, marginTop: 24 },
+  landingIntroActionPrimary: { color: '#fff', fontSize: 14, fontWeight: '800', backgroundColor: C.brand, borderRadius: 8, paddingHorizontal: 16, paddingVertical: 11, overflow: 'hidden' },
+  landingIntroActionSecondary: { color: '#fff', fontSize: 13, fontWeight: '700', textDecorationLine: 'underline' },
+  landingBackLink: { alignSelf: 'flex-start', marginTop: 22, paddingVertical: 8 },
+  landingBackLinkText: { color: '#fff', fontSize: 13, fontWeight: '700', textDecorationLine: 'underline' },
+  landingAuthCard: { position: 'relative', zIndex: 1, width: '100%', maxWidth: 460, alignSelf: 'center', backgroundColor: '#fff', borderColor: '#fff', shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 24, shadowOffset: { width: 0, height: 12 }, elevation: 10 },
+  landingAuthCardMobile: { maxWidth: 460, alignSelf: 'stretch' },
+  landingPhotoCredit: { position: 'absolute', zIndex: 2, bottom: 10, left: 14, flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 5, backgroundColor: 'rgba(20,25,28,0.72)' },
+  landingPhotoCreditText: { color: '#fff', fontSize: 9, fontWeight: '600' },
+  landingPhotoCreditLink: { color: '#fff', fontSize: 9, textDecorationLine: 'underline' },
+  authEyebrow: { color: C.brand, fontSize: 10, fontWeight: '800', letterSpacing: 1.2, marginBottom: 7 },
+  authTitle: { color: C.tx, fontSize: 25, fontWeight: '800' },
+  authDescription: { color: C.mu, fontSize: 13, marginTop: 4, marginBottom: 12 },
+  authModeSwitch: { marginTop: 16, alignItems: 'center' },
+  landingFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 24, marginTop: 14, paddingHorizontal: 18, paddingVertical: 16, backgroundColor: '#fff', borderWidth: 1, borderColor: '#e5e3df', borderRadius: 12 },
+  landingFooterMobile: { flexDirection: 'column', alignItems: 'flex-start', gap: 5 },
+  landingFooterTitle: { color: C.tx, fontSize: 16, fontWeight: '700' },
+  landingFooterText: { color: C.mu, fontSize: 13, textAlign: 'right', maxWidth: 560 },
   logo: { width: 60, height: 60, borderRadius: 18, backgroundColor: C.brand, alignItems: 'center', justifyContent: 'center', alignSelf: 'center' },
   door: { width: 22, height: 32, borderRadius: 5, backgroundColor: '#fff', justifyContent: 'center', alignItems: 'flex-end', paddingRight: 4 },
   knob: { width: 5, height: 5, borderRadius: 3, backgroundColor: C.brand },
-  loginBrandRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 12, marginBottom: 2 },
-  loginBrand: { fontSize: 32, fontWeight: '800', color: C.tx, letterSpacing: -0.5 },
   brandRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   brandName: { fontSize: 18, fontWeight: '800', color: C.tx, letterSpacing: -0.3 },
-  loginTag: { textAlign: 'center', color: C.mu, marginTop: 4, marginBottom: 22 },
   loginCard: { borderWidth: 1, borderColor: C.line, borderRadius: 18, padding: 20 },
   phoneRow: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: C.line, borderRadius: 8, paddingLeft: 12, marginVertical: 5 },
   phonePrefix: { color: C.tx, fontWeight: '600' },

@@ -92,5 +92,6 @@ class CdoListingsSeeder extends Seeder
 
         // Link the photo files in public/images/listings/
         $this->call(ListingPhotosSeeder::class);
+        $this->call(CdoHotelListingsSeeder::class);
     }
 }

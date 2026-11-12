@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\{Booking, Listing};
 use Illuminate\Http\Request;
+use Illuminate\Support\Str;
 
 class ListingController extends Controller
 {
@@ -41,6 +42,8 @@ class ListingController extends Controller
             'id' => $l->id, 'name' => $l->name, 'price' => $l->price, 'availability' => $l->availabilityLabel(),
             'available_from' => $l->available_from?->toDateString(), 'available_to' => $l->available_to?->toDateString(),
             'type' => $l->type, 'location' => $l->location, 'photo' => $l->photoUrl(), 'photos' => $l->photoUrls(),
+            'star_rating' => $l->star_rating, 'serves_breakfast' => $l->serves_breakfast,
+            'has_pool' => $l->has_pool, 'featured' => $l->featured,
             // dates only, never guest names: each pair is [check-in day, check-out day]
             'booked' => $l->bookings->map(fn ($b) => [$b->check_in->toDateString(), $b->check_out->toDateString()])->values()]));
     }
@@ -54,6 +57,28 @@ class ListingController extends Controller
     {
         $listing = Listing::create($this->data($r) + ['host_id' => $r->user()->id]); // host comes from the login, not the app
         return response()->json($this->hostRow($listing), 201);
+    }
+
+    public function uploadPhoto(Request $r, Listing $listing)
+    {
+        if (!$this->own($r, $listing)) return $this->fail('Not your listing.');
+
+        $validated = $r->validate([
+            'photo' => ['required', 'image', 'mimes:jpeg,png,webp', 'max:5120'],
+        ]);
+        $file = $validated['photo'];
+        $extension = $file->guessExtension();
+        $filename = 'listing-' . $listing->id . '-' . Str::lower(Str::random(16));
+        $directory = public_path('images/listings');
+
+        if (!is_dir($directory) && !mkdir($directory, 0755, true) && !is_dir($directory)) {
+            throw new \RuntimeException('Could not create the listing photo directory.');
+        }
+
+        $file->move($directory, "{$filename}.{$extension}");
+        $listing->update(['photo' => $filename]);
+
+        return response()->json($this->hostRow($listing->refresh()));
     }
 
     public function update(Request $r, Listing $listing)

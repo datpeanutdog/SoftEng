@@ -5,8 +5,15 @@ use Illuminate\Database\Eloquent\Model;
 
 class Listing extends Model
 {
-    protected $fillable = ['host_id', 'name', 'type', 'location', 'price', 'available_from', 'available_to', 'status', 'battery', 'photo'];
-    protected $casts = ['available_from' => 'date', 'available_to' => 'date'];
+    protected $fillable = ['host_id', 'name', 'type', 'location', 'price', 'available_from', 'available_to', 'status', 'battery', 'photo', 'star_rating', 'serves_breakfast', 'has_pool', 'featured'];
+    protected $casts = [
+        'available_from' => 'date',
+        'available_to' => 'date',
+        'star_rating' => 'integer',
+        'serves_breakfast' => 'boolean',
+        'has_pool' => 'boolean',
+        'featured' => 'boolean',
+    ];
 
     public function bookings() { return $this->hasMany(Booking::class); }
     public function events() { return $this->hasMany(LockEvent::class); }

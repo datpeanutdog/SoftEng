@@ -33,6 +33,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/bookings/{booking}/decline', [BookingController::class, 'decline']);
         Route::get('/host/listings', [ListingController::class, 'hostListings']);
         Route::post('/host/listings', [ListingController::class, 'store']);
+        Route::post('/host/listings/{listing}/photo', [ListingController::class, 'uploadPhoto']);
         Route::put('/host/listings/{listing}', [ListingController::class, 'update']);
         Route::delete('/host/listings/{listing}', [ListingController::class, 'destroy']);
         Route::get('/host/doorlock', [ListingController::class, 'doorlock']);
