@@ -63,6 +63,16 @@ Guests select e-wallet, bank transfer, or cash in My bookings and submit a trans
 
 Payment destinations are not configured in the app. Share payment details with guests through a verified channel; never ask for a PIN or OTP.
 
+### Online checkout
+
+Online checkout supports the demo flow (default), PayPal, and HitPay. Configure the selected driver and its credentials in `backend/.env`, then restart Laravel:
+
+- `PAYMENT_DRIVER=demo` simulates checkout and does not charge money.
+- `PAYMENT_DRIVER=paypal` uses PayPal. Set `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET`; the default API URL is PayPal Sandbox. Set `PAYPAL_BASE_URL=https://api-m.paypal.com` only when intentionally switching to live payments. `PAYPAL_RETURN_BASE` may be set to the backend's public URL when it cannot be derived from `APP_URL`.
+- `PAYMENT_DRIVER=hitpay` uses HitPay. Set `HITPAY_API_KEY`; the default API URL is HitPay Sandbox. Set `HITPAY_SALT` to the webhook signing salt and register `https://<backend-host>/api/webhooks/hitpay` in HitPay. Use the live API URL and live credentials only when ready to accept real payments.
+
+The backend verifies payment status with the selected provider; a browser redirect or webhook alone does not mark a booking paid. Keep provider credentials server-side and use sandbox credentials for development.
+
 Booking approval, denial, and cancellation SMS notifications use Semaphore. Set `SEMAPHORE_API_KEY` in the backend `.env` file and restart Laravel. `SEMAPHORE_SENDER_NAME` is optional. SMS delivery is reported to the staff member if the provider is not configured or rejects a request; admins can retry failed messages from the SMS tab.
 
 ## License

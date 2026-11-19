@@ -65,6 +65,96 @@ class PaymentFlowTest extends TestCase
         Http::assertSent(fn ($request) => str_contains($request['message'], 'was approved'));
     }
 
+    public function test_guest_can_start_and_poll_a_hitpay_checkout(): void
+    {
+        config([
+            'services.payments.driver' => 'hitpay',
+            'services.hitpay.key' => 'test-key',
+        ]);
+        Http::fakeSequence()
+            ->push(['id' => 'hp-request-123', 'url' => 'https://checkout.example/pay'], 200)
+            ->push([
+                'status' => 'completed',
+                'reference_number' => 'booking-1',
+                'payments' => [[
+                    'status' => 'succeeded',
+                    'amount' => '3000.00',
+                    'currency' => 'PHP',
+                    'payment_type' => 'gcash',
+                ]],
+            ], 200);
+
+        $guest = User::factory()->create(['role' => 'Guest', 'phone' => '+639171234567']);
+        $otherGuest = User::factory()->create(['role' => 'Guest', 'phone' => '+639171234568']);
+        $host = User::factory()->create(['role' => 'Host']);
+        $booking = $this->booking($guest, $host, 'Pending');
+
+        $this->actingAs($otherGuest)->postJson("/api/bookings/{$booking->id}/pay")
+            ->assertForbidden();
+
+        $this->actingAs($guest)->postJson("/api/bookings/{$booking->id}/pay")
+            ->assertOk()
+            ->assertJsonPath('checkout_url', 'https://checkout.example/pay')
+            ->assertJsonPath('booking.payment_status', 'unpaid');
+
+        $this->actingAs($guest)->getJson("/api/bookings/{$booking->id}/payment/status")
+            ->assertOk()
+            ->assertJsonPath('payment_status', 'verified')
+            ->assertJsonPath('payment_method', 'gcash');
+
+        $this->assertDatabaseHas('bookings', [
+            'id' => $booking->id,
+            'payment_reference' => 'hp-request-123',
+            'payment_status' => 'verified',
+        ]);
+    }
+
+    public function test_guest_can_start_and_poll_a_paypal_checkout(): void
+    {
+        config([
+            'services.payments.driver' => 'paypal',
+            'services.paypal.client_id' => 'test-client',
+            'services.paypal.secret' => 'test-secret',
+        ]);
+        Http::fakeSequence()
+            ->push(['access_token' => 'test-token'], 200)
+            ->push([
+                'id' => 'paypal-order-123',
+                'links' => [['rel' => 'payer-action', 'href' => 'https://paypal.example/approve']],
+            ], 201)
+            ->push(['status' => 'APPROVED'], 200)
+            ->push(['status' => 'COMPLETED'], 201)
+            ->push([
+                'status' => 'COMPLETED',
+                'purchase_units' => [[
+                    'reference_id' => 'booking-1',
+                    'payments' => ['captures' => [[
+                        'status' => 'COMPLETED',
+                        'amount' => ['value' => '3000.00', 'currency_code' => 'PHP'],
+                    ]]],
+                ]],
+            ], 200);
+
+        $guest = User::factory()->create(['role' => 'Guest', 'phone' => '+639171234567']);
+        $host = User::factory()->create(['role' => 'Host']);
+        $booking = $this->booking($guest, $host, 'Pending');
+
+        $this->actingAs($guest)->postJson("/api/bookings/{$booking->id}/pay")
+            ->assertOk()
+            ->assertJsonPath('checkout_url', 'https://paypal.example/approve');
+
+        $this->actingAs($guest)->getJson("/api/bookings/{$booking->id}/payment/status")
+            ->assertOk()
+            ->assertJsonPath('payment_status', 'verified')
+            ->assertJsonPath('payment_method', 'paypal');
+
+        $this->assertDatabaseHas('bookings', [
+            'id' => $booking->id,
+            'payment_reference' => 'paypal-order-123',
+            'payment_status' => 'verified',
+        ]);
+    }
+
     public function test_admin_can_retry_a_failed_decision_sms(): void
     {
         Http::fakeSequence()->push([], 500)->push([], 200);
