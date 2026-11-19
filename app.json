@@ -8,6 +8,16 @@
     "splash": {
       "backgroundColor": "#ffffff"
     },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow LockBay hosts to select property photos to upload.",
+          "cameraPermission": false,
+          "microphonePermission": false
+        }
+      ]
+    ],
     "assetBundlePatterns": [
       "**/*"
     ],

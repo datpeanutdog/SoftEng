@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { View, Text, TextInput, Linking, TouchableOpacity, ScrollView, RefreshControl, Alert, Platform, StatusBar, ActivityIndicator, Image, Modal, KeyboardAvoidingView, StyleSheet, useWindowDimensions } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import { API } from './config'; // your PC's IP lives in config.js, so updates to this file never erase it
 
 
@@ -11,11 +12,12 @@ async function call(path, method = 'GET', body) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 10000); // give up after 10 seconds instead of waiting forever
   try {
+    const multipart = typeof FormData !== 'undefined' && body instanceof FormData;
     res = await fetch(API + path, {
       method,
       signal: ctl.signal,
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...(TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {}) },
-      body: body ? JSON.stringify(body) : undefined,
+      headers: { Accept: 'application/json', ...(!multipart ? { 'Content-Type': 'application/json' } : {}), ...(TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {}) },
+      body: body ? multipart ? body : JSON.stringify(body) : undefined,
     });
   } catch (e) {
     throw new Error('Cannot reach the server. Check the IP address in config.js, that php artisan serve is running with --host=0.0.0.0, and that your phone is on the same Wi-Fi.');
@@ -52,8 +54,8 @@ const Badge = ({ t, k }) => {
   const m = { ok: ['#e3f4e8', '#117a3a'], bad: ['#fde8e4', '#c2321b'], w: ['#fff1d6', '#8a5a00'] }[k] || ['#ececec', '#555'];
   return <View style={[s.badge, { backgroundColor: m[0] }]}><Text style={{ color: m[1], fontSize: 12, fontWeight: '600' }}>{t}</Text></View>;
 };
-const Btn = ({ t, onPress, p }) => (
-  <TouchableOpacity onPress={onPress} style={[s.btn, p && s.btnP]}><Text style={[s.btnT, p && { color: '#fff' }]}>{t}</Text></TouchableOpacity>
+const Btn = ({ t, onPress, p, disabled }) => (
+  <TouchableOpacity disabled={disabled} onPress={onPress} style={[s.btn, p && s.btnP, disabled && { opacity: 0.55 }]}><Text style={[s.btnT, p && { color: '#fff' }]}>{t}</Text></TouchableOpacity>
 );
 const Card = ({ children }) => <View style={s.card}>{children}</View>;
 const Empty = ({ t }) => <Text style={s.empty}>{t}</Text>;
@@ -374,6 +376,9 @@ function Requests() {
   );
 }
 function ListingForm({ l, onSave, onCancel }) {
+  const [savedListing, setSavedListing] = useState(l || null);
+  const [photos, setPhotos] = useState([]);
+  const [busy, setBusy] = useState(false);
   const [name, setName] = useState(l ? l.name : '');
   const [type, setType] = useState(l ? l.type : 'Hotel');
   const [location, setLocation] = useState(l && l.location ? l.location : '');
@@ -381,16 +386,62 @@ function ListingForm({ l, onSave, onCancel }) {
   const [from, setFrom] = useState(l && l.available_from ? l.available_from : '');
   const [to, setTo] = useState(l && l.available_to ? l.available_to : '');
   const [status, setStatus] = useState(l ? l.status : 'active');
+  const choosePhotos = async () => {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsMultipleSelection: true,
+        selectionLimit: 8,
+        quality: 0.85,
+      });
+      if (!result.canceled) setPhotos(result.assets.slice(0, 8));
+    } catch (e) {
+      Alert.alert('Could not choose photos', e.message);
+    }
+  };
+  const uploadPhotos = async (listingId) => {
+    const form = new FormData();
+    photos.forEach((photo, index) => {
+      const name = photo.fileName || `listing-photo-${index + 1}.jpg`;
+      if (Platform.OS === 'web' && photo.file) {
+        form.append('photos[]', photo.file, name);
+      } else {
+        form.append('photos[]', { uri: photo.uri, name, type: photo.mimeType || 'image/jpeg' });
+      }
+    });
+    await call(`/host/listings/${listingId}/photos`, 'POST', form);
+  };
   const save = async () => {
+    if (busy) return;
+    setBusy(true);
+    let saved;
     try {
       const body = { name, type, location, price: parseInt(price, 10), available_from: from || null, available_to: to || null, status };
-      if (l) await call(`/host/listings/${l.id}`, 'PUT', body); else await call('/host/listings', 'POST', body);
-      onSave();
-    } catch (e) { Alert.alert('Could not save listing', e.message); }
+      saved = savedListing
+        ? await call(`/host/listings/${savedListing.id}`, 'PUT', body)
+        : await call('/host/listings', 'POST', body);
+      setSavedListing(saved);
+    } catch (e) {
+      Alert.alert('Could not save listing', e.message);
+      setBusy(false);
+      return;
+    }
+
+    if (photos.length) {
+      try {
+        await uploadPhotos(saved.id);
+      } catch (e) {
+        Alert.alert('Listing saved, but photos could not be uploaded', e.message);
+        setBusy(false);
+        return;
+      }
+    }
+    onSave();
+    setBusy(false);
   };
   return (
     <Card>
-      <Text style={s.bold}>{l ? 'Edit listing' : 'Add listing'}</Text>
+      <Text style={s.bold}>{savedListing ? 'Edit listing' : 'Add listing'}</Text>
       <TextInput style={s.input} placeholder="Property name" value={name} onChangeText={setName} />
       <Text style={s.mu}>Property type</Text>
       <View style={s.row2}>
@@ -407,7 +458,19 @@ function ListingForm({ l, onSave, onCancel }) {
       <View style={s.row2}>
         <Btn t={status === 'active' ? 'Status: Active (tap to pause)' : 'Status: Paused (tap to activate)'} onPress={() => setStatus(status === 'active' ? 'paused' : 'active')} />
       </View>
-      <View style={s.row2}><Btn p t={l ? 'Save changes' : 'Add listing'} onPress={save} /><Btn t="Cancel" onPress={onCancel} /></View>
+      <Text style={s.mu}>Listing photos (up to 8, JPG/PNG/WebP, 5 MB each). Choosing photos replaces the uploaded gallery.</Text>
+      <View style={s.row2}>
+        <Btn t="Choose photos" onPress={choosePhotos} />
+        {photos.length > 0 && <Btn t={`Clear selection (${photos.length})`} onPress={() => setPhotos([])} />}
+      </View>
+      {photos.length > 0 ? (
+        <View style={s.photoPreviewRow}>
+          {photos.map((photo) => <Image key={photo.uri} source={{ uri: photo.uri }} style={s.photoPreview} />)}
+        </View>
+      ) : savedListing && savedListing.photos && savedListing.photos.length > 0 ? (
+        <Photo uris={savedListing.photos} />
+      ) : null}
+      <View style={s.row2}><Btn p disabled={busy} t={busy ? 'Saving...' : savedListing ? 'Save changes' : 'Add listing'} onPress={save} /><Btn t="Cancel" onPress={onCancel} /></View>
     </Card>
   );
 }
@@ -715,6 +778,8 @@ const s = StyleSheet.create({
   photoDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.55)' },
   photoDotOn: { backgroundColor: '#fff' },
   photoEmpty: { alignItems: 'center', justifyContent: 'center' },
+  photoPreviewRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 },
+  photoPreview: { width: 88, height: 72, borderRadius: 8, backgroundColor: '#eee' },
   app: { flex: 1, backgroundColor: '#fff', paddingTop: Platform.OS === 'web' ? 0 : Platform.OS === 'ios' ? 54 : (StatusBar.currentHeight || 24) + 8 },
   desktopApp: { paddingTop: 0, backgroundColor: C.side },
   desktopLayout: { flex: 1, flexDirection: 'row' },

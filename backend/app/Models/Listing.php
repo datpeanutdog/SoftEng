@@ -10,6 +10,7 @@ class Listing extends Model
 
     public function bookings() { return $this->hasMany(Booking::class); }
     public function events() { return $this->hasMany(LockEvent::class); }
+    public function uploadedPhotos() { return $this->hasMany(ListingPhoto::class)->orderBy('position'); }
 
     public function logEvent(string $event, string $result = 'success'): void
     {
@@ -19,6 +20,8 @@ class Listing extends Model
     /** Public URL of this listing's photo, or null when no file has been added yet. */
     public function photoUrl(): ?string
     {
+        $uploaded = $this->uploadedPhotos()->first();
+        if ($uploaded) return url('/storage/' . $uploaded->path);
         if (!$this->photo) return null;
         foreach (['jpg', 'jpeg', 'png', 'webp'] as $ext) {
             $path = public_path("images/listings/{$this->photo}.{$ext}");
@@ -33,6 +36,10 @@ class Listing extends Model
      */
     public function photoUrls(): array
     {
+        $uploaded = $this->uploadedPhotos()->get();
+        if ($uploaded->isNotEmpty()) {
+            return $uploaded->map(fn (ListingPhoto $photo) => url('/storage/' . $photo->path))->all();
+        }
         if (!$this->photo) return [];
         $urls = [];
         for ($n = 1; $n <= 8; $n++) {

@@ -12,7 +12,6 @@ class PaymentController extends Controller
 {
     private function fail(string $m, int $c = 422) { return response()->json(['message' => $m], $c); }
 
-    /** The active real gateway (null in demo mode). Both have enabled(), createCheckout() and sync(). */
     private function gateway()
     {
         return match (config('services.payments.driver')) {
@@ -22,14 +21,13 @@ class PaymentController extends Controller
         };
     }
 
-    /** Guest taps "Pay online": start a checkout and return its link. */
     public function pay(Request $request, Booking $booking)
     {
         if ((int) $booking->guest_id !== (int) $request->user()->id) return $this->fail('Unauthorized.', 403);
         if (! in_array($booking->status, ['Pending', 'Flagged'], true)) return $this->fail('Payment can only be made for a pending booking.');
         if ($booking->payment_status !== 'unpaid') return $this->fail('Payment has already been submitted.');
 
-        if (config('services.payments.driver') === 'demo') { // fake gateway for demos, no real money
+        if (config('services.payments.driver') === 'demo') {
             $ref = 'demo_' . Str::random(32);
             $booking->update(['payment_method' => 'online', 'payment_reference' => $ref]);
             return response()->json(['checkout_url' => url('/pay/demo/' . $ref), 'booking' => $booking->toRow(true)]);
@@ -47,7 +45,6 @@ class PaymentController extends Controller
             return $this->fail('Could not start the payment: ' . $e->getMessage(), 502);
         }
 
-        // Stays "unpaid" until the gateway confirms the money arrived.
         $booking->update(['payment_method' => 'online', 'payment_reference' => $checkout['id']]);
         return response()->json(['checkout_url' => $checkout['checkout_url'], 'booking' => $booking->toRow(true)]);
     }
@@ -63,7 +60,6 @@ class PaymentController extends Controller
         return response()->json($booking->toRow(true));
     }
 
-    /** HitPay -> your server (production only). Always re-checked with HitPay, never trusted. */
     public function webhook(Request $request, HitPay $hp)
     {
         if (! $hp->validSignature($request->getContent(), $request->header('Hitpay-Signature'))) {

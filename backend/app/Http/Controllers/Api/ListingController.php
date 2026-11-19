@@ -4,6 +4,8 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\{Booking, Listing};
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 
 class ListingController extends Controller
 {
@@ -63,12 +65,51 @@ class ListingController extends Controller
         return response()->json($this->hostRow($listing));
     }
 
+    public function uploadPhotos(Request $r, Listing $listing)
+    {
+        if (!$this->own($r, $listing)) return $this->fail('Not your listing.');
+
+        $data = $r->validate([
+            'photos' => ['required', 'array', 'min:1', 'max:8'],
+            'photos.*' => ['required', 'image', 'mimes:jpg,jpeg,png,webp', 'max:5120'],
+        ]);
+
+        $disk = Storage::disk('public');
+        $paths = [];
+        foreach ($data['photos'] as $photo) {
+            $path = $photo->storePublicly('listings', 'public');
+            if ($path === false) {
+                $disk->delete($paths);
+                throw new \RuntimeException('A listing photo could not be stored.');
+            }
+            $paths[] = $path;
+        }
+
+        $oldPaths = $listing->uploadedPhotos()->pluck('path')->all();
+        try {
+            DB::transaction(function () use ($listing, $paths) {
+                $listing->uploadedPhotos()->delete();
+                foreach ($paths as $position => $path) {
+                    $listing->uploadedPhotos()->create(['path' => $path, 'position' => $position + 1]);
+                }
+            });
+        } catch (\Throwable $e) {
+            $disk->delete($paths);
+            throw $e;
+        }
+
+        $disk->delete($oldPaths);
+        return response()->json($this->hostRow($listing));
+    }
+
     public function destroy(Request $r, Listing $listing)
     {
         if (!$this->own($r, $listing)) return $this->fail('Not your listing.');
         $busy = $listing->bookings()->whereIn('status', ['Pending', 'Flagged', 'Approved'])->where('check_out', '>=', now())->exists();
         if ($busy) return $this->fail('This listing has active bookings. Pause it instead of deleting it.', 422);
+        $uploadedPaths = $listing->uploadedPhotos()->pluck('path')->all();
         $listing->delete();
+        Storage::disk('public')->delete($uploadedPaths);
         return response()->json(['message' => 'Listing deleted.']);
     }
 

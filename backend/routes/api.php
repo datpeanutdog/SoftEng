@@ -34,6 +34,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/host/listings', [ListingController::class, 'hostListings']);
         Route::post('/host/listings', [ListingController::class, 'store']);
         Route::put('/host/listings/{listing}', [ListingController::class, 'update']);
+        Route::post('/host/listings/{listing}/photos', [ListingController::class, 'uploadPhotos']);
         Route::delete('/host/listings/{listing}', [ListingController::class, 'destroy']);
         Route::get('/host/doorlock', [ListingController::class, 'doorlock']);
         Route::post('/host/access/{booking}/remove', [ListingController::class, 'removeAccess']);
