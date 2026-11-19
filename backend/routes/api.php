@@ -3,28 +3,52 @@
 use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\BookingController;
+use App\Http\Controllers\Api\ListingController;
+use App\Http\Controllers\Api\PaymentController;
 use App\Http\Middleware\RoleMiddleware;
 use Illuminate\Support\Facades\Route;
 
 Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login', [AuthController::class, 'login']);
+Route::post('/webhooks/hitpay', [PaymentController::class, 'webhook']); // called by HitPay; always re-checked with HitPay
 
 Route::middleware('auth:sanctum')->group(function () {
     Route::get('/me', [AuthController::class, 'me']);
     Route::post('/logout', [AuthController::class, 'logout']);
 
+    // Role-filtered list: guests see theirs, hosts see their listings' bookings, admins see all
     Route::get('/bookings', [BookingController::class, 'index']);
-    Route::post('/bookings', [BookingController::class, 'store']);
-    Route::patch('/bookings/{booking}', [BookingController::class, 'update']);
+
+    Route::middleware(RoleMiddleware::class . ':Guest')->group(function () {
+        Route::get('/listings', [ListingController::class, 'index']);
+        Route::post('/bookings', [BookingController::class, 'store']);
+        Route::patch('/bookings/{booking}', [BookingController::class, 'update']); // guest cancels own request
+        Route::put('/bookings/{booking}/payment', [BookingController::class, 'submitPayment']); // manual: bank transfer / cash
+        Route::post('/bookings/{booking}/pay', [PaymentController::class, 'pay']);                // online: GCash / Maya / card
+        Route::get('/bookings/{booking}/payment/status', [PaymentController::class, 'status']);
+    });
 
     Route::middleware(RoleMiddleware::class . ':Host')->group(function () {
         Route::post('/bookings/{booking}/approve', [BookingController::class, 'approve']);
+        Route::post('/bookings/{booking}/decline', [BookingController::class, 'decline']);
+        Route::get('/host/listings', [ListingController::class, 'hostListings']);
+        Route::post('/host/listings', [ListingController::class, 'store']);
+        Route::put('/host/listings/{listing}', [ListingController::class, 'update']);
+        Route::post('/host/listings/{listing}/photo', [ListingController::class, 'uploadPhoto']);
+        Route::post('/host/listings/{listing}/photos', [ListingController::class, 'uploadPhotos']);
+        Route::delete('/host/listings/{listing}', [ListingController::class, 'destroy']);
+        Route::get('/host/doorlock', [ListingController::class, 'doorlock']);
+        Route::post('/host/access/{booking}/remove', [ListingController::class, 'removeAccess']);
+        Route::post('/host/doorlock/{listing}/battery-replaced', [ListingController::class, 'replaceBattery']);
     });
 
     Route::middleware(RoleMiddleware::class . ':Admin')->group(function () {
         Route::get('/admin/metrics', [AdminController::class, 'metrics']);
         Route::get('/admin/users', [AdminController::class, 'users']);
         Route::patch('/admin/bookings/{booking}', [AdminController::class, 'updateBooking']);
+        Route::post('/admin/bookings/{booking}/payment/verify', [AdminController::class, 'verifyPayment']);
+        Route::post('/admin/bookings/{booking}/refund/complete', [AdminController::class, 'completeRefund']);
+        Route::post('/admin/bookings/{booking}/sms/resend', [AdminController::class, 'resendDecisionSms']);
         Route::patch('/admin/users/{user}', [AdminController::class, 'toggleUser']);
     });
 });

@@ -1,5 +1,4 @@
 <?php
-
 namespace Database\Seeders;
 
 use Illuminate\Database\Console\Seeds\WithoutModelEvents;
@@ -9,11 +8,9 @@ class DatabaseSeeder extends Seeder
 {
     use WithoutModelEvents;
 
-    /**
-     * Seed the application's database.
-     */
     public function run(): void
     {
-        $this->call(DemoUserSeeder::class);
+        // DemoDataSeeder creates the team accounts, sample guests, places and bookings.
+        $this->call([DemoDataSeeder::class, CdoHotelListingsSeeder::class]);
     }
 }

@@ -1,454 +1,1160 @@
-import React, { useMemo, useState } from 'react';
-import {
-  Alert,
-  Pressable,
-  SafeAreaView,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
-import { StatusBar } from 'expo-status-bar';
+import React, { useState, useEffect, useCallback } from 'react';
+import { View, Text, TextInput, Linking, TouchableOpacity, ScrollView, RefreshControl, Alert, Platform, StatusBar, ActivityIndicator, Image, Modal, KeyboardAvoidingView, StyleSheet, useWindowDimensions } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
+import { API } from './config'; // your PC's IP lives in config.js, so updates to this file never erase it
 
-const listings = [
-  { id: 'skyline', title: 'Skyline Loft', city: 'New York', price: 220, details: '2 guests · 1 bed · Fast Wi-Fi', hostId: 'host@doorkey.demo' },
-  { id: 'harbor', title: 'Harbor View', city: 'Seattle', price: 185, details: '4 guests · 2 beds · EV charging', hostId: 'host@doorkey.demo' },
-  { id: 'sunset', title: 'Sunset A-Frame', city: 'Austin', price: 260, details: '3 guests · Patio · Smart lock', hostId: 'host@doorkey.demo' },
-];
 
-const initialAccounts = [
-  { id: 'demo-host', name: 'DoorKey Host', email: 'host@doorkey.demo', password: 'host123', role: 'Host', active: true },
-  { id: 'demo-admin', name: 'DoorKey Admin', email: 'admin@doorkey.demo', password: 'admin123', role: 'Admin', active: true },
-];
+const C = { brand: '#e11d5a', line: '#dcdcdc', mu: '#6b6b6b', tx: '#222', side: '#f7f7f7' };
+const LANDMARK_IMAGE = require('./backend/public/images/cdo-gaston-park-city-hall.jpg');
+const LANDMARK_SOURCE_URL = 'https://commons.wikimedia.org/wiki/File:Gaston_Park,_Gaerlan-Capistrano_WB,_CDO_City_Hall,_CDO_River_drone_(Cagayan_De_Oro_City;_03-19-2026).jpg';
+const LANDMARK_LICENSE_URL = 'https://creativecommons.org/licenses/by-sa/4.0/';
+let TOKEN = null;
 
-const makeId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-const makeAccessCode = () => String(Math.floor(100000 + Math.random() * 900000));
+function photoUri(uri) {
+  if (!uri) return uri;
+  const apiOrigin = API.replace(/\/api\/?$/, '');
+  return uri.replace(/^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?/i, apiOrigin);
+}
 
-function ActionButton({ label, onPress, variant = 'primary', disabled = false }) {
+async function call(path, method = 'GET', body) {
+  let res;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 10000); // give up after 10 seconds instead of waiting forever
+  try {
+    res = await fetch(API + path, {
+      method,
+      signal: ctl.signal,
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...(TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    throw new Error('Cannot reach the server. Check the IP address in config.js, that php artisan serve is running with --host=0.0.0.0, and that your phone is on the same Wi-Fi.');
+  } finally {
+    clearTimeout(timer);
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((data.errors && Object.values(data.errors)[0][0]) || data.message || 'Something went wrong.');
+  return data;
+}
+
+async function uploadPhotos(path, assets) {
+  const form = new FormData();
+  for (let index = 0; index < assets.length; index += 1) {
+    const asset = assets[index];
+    const name = asset.fileName || `listing-photo-${index + 1}.jpg`;
+    if (Platform.OS === 'web') {
+      const file = asset.file || await fetch(asset.uri).then((response) => response.blob());
+      form.append('photos[]', file, name);
+    } else {
+      form.append('photos[]', {
+        uri: asset.uri,
+        name,
+        type: asset.mimeType || 'image/jpeg',
+      });
+    }
+  }
+  const res = await fetch(API + path, {
+    method: 'POST',
+    headers: { Accept: 'application/json', ...(TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {}) },
+    body: form,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((data.errors && Object.values(data.errors)[0][0]) || data.message || 'Could not upload photos.');
+  return data;
+}
+
+// Loads one or more endpoints. data is an array in the same order as the paths.
+function useLoad(paths) {
+  const key = (Array.isArray(paths) ? paths : [paths]).join('|');
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState('');
+  const [ref, setRef] = useState(false);
+  const load = useCallback(async () => {
+    try { setErr(''); setData(await Promise.all(key.split('|').map((p) => call(p)))); } catch (e) { setErr(e.message); }
+    setRef(false);
+  }, [key]);
+  useEffect(() => { load(); }, [load]);
+  return { data, err, ref, silent: load, reload: () => { setRef(true); load(); } };
+}
+
+async function run(fn, hook) {
+  try { await fn(); hook.silent(); } catch (e) { Alert.alert('Could not complete', e.message); }
+}
+const ask = (title, onYes) => Alert.alert(title, '', [{ text: 'Keep it', style: 'cancel' }, { text: 'Confirm', onPress: onYes }]);
+const cap = (x) => (x ? x[0].toUpperCase() + x.slice(1) : '');
+const kind = (st) => (['Approved', 'active', 'success', 'Active'].includes(st) ? 'ok' : ['Denied', 'Cancelled', 'failed', 'Disabled'].includes(st) ? 'bad' : 'w');
+
+const Badge = ({ t, k }) => {
+  const m = { ok: ['#e3f4e8', '#117a3a'], bad: ['#fde8e4', '#c2321b'], w: ['#fff1d6', '#8a5a00'] }[k] || ['#ececec', '#555'];
+  return <View style={[s.badge, { backgroundColor: m[0] }]}><Text style={{ color: m[1], fontSize: 12, fontWeight: '600' }}>{t}</Text></View>;
+};
+const Btn = ({ t, onPress, p }) => (
+  <TouchableOpacity onPress={onPress} style={[s.btn, p && s.btnP]}><Text style={[s.btnT, p && { color: '#fff' }]}>{t}</Text></TouchableOpacity>
+);
+const Card = ({ children }) => <View style={s.card}>{children}</View>;
+const Empty = ({ t }) => <Text style={s.empty}>{t}</Text>;
+
+function Page({ title, sub, hook, children }) {
+  const { width } = useWindowDimensions();
+  const desktop = Platform.OS === 'web' && width >= 960;
   return (
-    <Pressable
-      accessibilityRole="button"
-      disabled={disabled}
-      onPress={onPress}
-      style={[styles.button, styles[`${variant}Button`], disabled && styles.disabledButton]}
-    >
-      <Text style={[styles.buttonText, variant === 'secondary' && styles.secondaryButtonText]}>
-        {label}
-      </Text>
-    </Pressable>
+    <ScrollView style={s.pageScroll} contentContainerStyle={[s.page, desktop && s.desktopPage]} refreshControl={<RefreshControl refreshing={hook.ref} onRefresh={hook.reload} />}>
+      <Text style={s.h1}>{title}</Text>
+      {sub ? <Text style={s.sub}>{sub}</Text> : null}
+      {hook.err ? <Text style={s.err}>{hook.err}</Text> : null}
+      {!hook.data && !hook.err ? <ActivityIndicator color={C.brand} /> : children}
+    </ScrollView>
+  );
+}
+const Stats = ({ items }) => (
+  <View style={s.stats}>{items.map(([l, v]) => <View key={l} style={s.stat}><Text style={s.mu}>{l}</Text><Text style={s.big}>{v}</Text></View>)}</View>
+);
+
+// Host: Approve / Decline.  Admin: Approve / Cancel.
+function BookingCard({ b, hook, role }) {
+  const host = role === 'Host';
+  const go = async (approve) => {
+    try {
+      const result = await (host
+        ? call(`/bookings/${b.id}/${approve ? 'approve' : 'decline'}`, 'POST')
+        : call(`/admin/bookings/${b.id}`, 'PATCH', { status: approve ? 'Approved' : 'Cancelled' }));
+      hook.silent();
+      if (result.sms && !result.sms.sent) Alert.alert('SMS notification failed', result.sms.message);
+    } catch (e) { Alert.alert('Could not complete', e.message); }
+  };
+  return (
+    <Card>
+      <View style={s.row}><Text style={s.bold}>{b.guest}</Text><Badge t={b.flag || cap(b.status)} k="w" /></View>
+      <Text style={s.mu}>{b.listing} - {b.dates}</Text>
+      <Text style={s.mu}>Payment: {b.payment_status === 'verified' ? 'Verified' : b.payment_status === 'pending_verification' ? `Awaiting verification (${b.payment_method || 'unknown'})` : 'Not submitted'}</Text>
+      {b.payment_reference ? <Text style={s.mu}>Reference: {b.payment_reference}</Text> : null}
+      <View style={s.row2}>
+        {b.payment_status === 'verified'
+          ? <Btn p t="Approve" onPress={() => go(true)} />
+          : <Text style={s.mu}>Payment must be verified by an admin before approval.</Text>}
+        <Btn t={host ? 'Decline' : 'Cancel'} onPress={() => go(false)} />
+      </View>
+    </Card>
   );
 }
 
-function Field({ label, value, onChangeText, placeholder, secureTextEntry = false, keyboardType = 'default', maxLength }) {
+const TYPES = ['Hotel', 'Airbnb', 'Motel', 'Pension house', 'Resort'];
+const peso = (n) => '\u20B1' + String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+
+function Logo({ size = 60 }) {
+  const w = size * 0.07;
   return (
-    <View style={styles.fieldGroup}>
-      <Text style={styles.fieldLabel}>{label}</Text>
-      <TextInput
-        accessibilityLabel={label}
-        autoCapitalize={label === 'Full name' ? 'words' : 'none'}
-        keyboardType={keyboardType}
-        maxLength={maxLength}
-        onChangeText={onChangeText}
-        placeholder={placeholder}
-        placeholderTextColor="#71819b"
-        secureTextEntry={secureTextEntry}
-        style={styles.input}
-        value={value}
-      />
+    <View style={{ width: size, height: size, borderRadius: size * 0.3, backgroundColor: C.brand, alignItems: 'center', justifyContent: 'center' }}>
+      <View style={{ width: size * 0.32, height: size * 0.24, borderWidth: w, borderBottomWidth: 0, borderColor: '#fff', borderTopLeftRadius: size * 0.16, borderTopRightRadius: size * 0.16 }} />
+      <View style={{ width: size * 0.5, height: size * 0.34, borderRadius: size * 0.07, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center', marginTop: -1 }}>
+        <View style={{ width: size * 0.09, height: size * 0.09, borderRadius: size * 0.05, backgroundColor: C.brand }} />
+        <View style={{ width: size * 0.035, height: size * 0.08, backgroundColor: C.brand, marginTop: -1 }} />
+      </View>
     </View>
   );
 }
 
-function StatusBadge({ status }) {
-  const tone = status === 'Approved' ? 'approved' : status === 'Denied' ? 'denied' : 'pending';
+// ---------- Guest ----------
+// ---------- Date picker (tap to open a calendar) ----------
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const pad = (n) => String(n).padStart(2, '0');
+const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const parseD = (str) => { const [y, m, d] = str.split('-').map(Number); return new Date(y, m - 1, d); };
+const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+const pretty = (str) => { const d = parseD(str); return `${MONTHS[d.getMonth()].slice(0, 3)} ${d.getDate()}, ${d.getFullYear()}`; };
+
+function DateField({ label, value, onChange, min, max, clearable, blocked = [] }) {
+  const [open, setOpen] = useState(false);
+  const [view, setView] = useState(new Date());
+  const show = () => {
+    const base = value ? parseD(value) : min ? parseD(min) : new Date();
+    setView(new Date(base.getFullYear(), base.getMonth(), 1));
+    setOpen(true);
+  };
+  const y = view.getFullYear();
+  const m = view.getMonth();
+  const cells = [...Array(new Date(y, m, 1).getDay()).fill(null), ...Array.from({ length: new Date(y, m + 1, 0).getDate() }, (_, k) => k + 1)];
+  const canPrev = !min || iso(new Date(y, m, 0)) >= min;
+  const canNext = !max || iso(new Date(y, m + 1, 1)) <= max;
   return (
-    <Text style={[styles.statusBadge, styles[`${tone}Badge`]]}>
-      {status}
-    </Text>
+    <>
+      <TouchableOpacity style={s.input} onPress={show}>
+        <Text style={{ color: value ? C.tx : '#999' }}>{value ? pretty(value) : label}</Text>
+      </TouchableOpacity>
+      <Modal transparent animationType="fade" visible={open} onRequestClose={() => setOpen(false)}>
+        <View style={s.overlay}>
+          <View style={s.cal}>
+            <Text style={s.bold}>{label}</Text>
+            <View style={s.row}>
+              <TouchableOpacity disabled={!canPrev} onPress={() => setView(new Date(y, m - 1, 1))}><Text style={[s.calNav, !canPrev && { opacity: 0.25 }]}>{'\u2039'}</Text></TouchableOpacity>
+              <Text style={s.bold2}>{MONTHS[m]} {y}</Text>
+              <TouchableOpacity disabled={!canNext} onPress={() => setView(new Date(y, m + 1, 1))}><Text style={[s.calNav, !canNext && { opacity: 0.25 }]}>{'\u203A'}</Text></TouchableOpacity>
+            </View>
+            <View style={s.calWeek}>{['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d, i) => <Text key={i} style={s.calHead}>{d}</Text>)}</View>
+            <View style={s.calGrid}>
+              {cells.map((d, k) => {
+                if (!d) return <View key={k} style={s.calCell} />;
+                const v = `${y}-${pad(m + 1)}-${pad(d)}`;
+                const occ = blocked.some(([a, b]) => v >= a && v < b); // night already booked
+                const off = occ || (min && v < min) || (max && v > max);
+                const sel = v === value;
+                return (
+                  <TouchableOpacity key={k} disabled={off} style={[s.calCell, occ && s.calOcc, sel && s.calSel]} onPress={() => { onChange(v); setOpen(false); }}>
+                    <Text style={[{ color: C.tx }, off && { color: '#ccc' }, occ && { color: '#c2321b' }, sel && { color: '#fff', fontWeight: '700' }]}>{d}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            {blocked.length ? <Text style={s.mu}>Red dates are already booked.</Text> : null}
+            <View style={s.row2}>
+              {clearable && value ? <Btn t="Clear" onPress={() => { onChange(''); setOpen(false); }} /> : null}
+              <Btn t="Close" onPress={() => setOpen(false)} />
+            </View>
+          </View>
+        </View>
+      </Modal>
+    </>
   );
 }
 
-export default function App() {
-  const [accounts, setAccounts] = useState(initialAccounts);
-  const [bookings, setBookings] = useState([]);
-  const [user, setUser] = useState(null);
-  const [screen, setScreen] = useState('login');
-  const [isRegistering, setIsRegistering] = useState(false);
+function Photo({ uris, compact = false }) {
+  const [box, setBox] = useState({ w: 0, h: 0 });
+  const w = box.w, h = box.h;
+  const [i, setI] = useState(0);
+  const [bad, setBad] = useState([]);
+  const ref = React.useRef(null);
+  const list = (uris || []).filter((u) => u && !bad.includes(u));
+  if (!list.length) return (
+    <View style={[s.photo, compact && s.photoCompact, s.photoEmpty, compact && s.photoPlaceholder]}>
+      <Text style={compact ? s.photoPlaceholderIcon : s.mu}>{compact ? '\uD83C\uDFE8' : 'No photo yet'}</Text>
+      {compact ? <Text style={s.photoPlaceholderText}>Stay photo coming soon</Text> : null}
+    </View>
+  );
+  const go = (n) => { const k = Math.max(0, Math.min(list.length - 1, n)); setI(k); if (ref.current) ref.current.scrollTo({ x: k * w, animated: true }); };
+  return (
+    <View style={[s.photo, compact && s.photoCompact]} onLayout={(e) => setBox({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height })}>
+      {w > 0 && h > 0 && (
+        <ScrollView ref={ref} horizontal pagingEnabled showsHorizontalScrollIndicator={false} scrollEventThrottle={16}
+          onScroll={(e) => setI(Math.round(e.nativeEvent.contentOffset.x / w))}>
+          {list.map((u) => <Image key={u} source={{ uri: photoUri(u) }} style={{ width: w, height: h }} resizeMode="cover" onError={() => setBad((b) => [...b, u])} />)}
+        </ScrollView>
+      )}
+      {list.length > 1 && <>
+        {i > 0 && <TouchableOpacity style={[s.photoArrow, { left: 8 }]} onPress={() => go(i - 1)}><Text style={s.photoArrowT}>{'\u2039'}</Text></TouchableOpacity>}
+        {i < list.length - 1 && <TouchableOpacity style={[s.photoArrow, { right: 8 }]} onPress={() => go(i + 1)}><Text style={s.photoArrowT}>{'\u203A'}</Text></TouchableOpacity>}
+        <View style={s.photoDots}>{list.map((u, k) => <View key={u} style={[s.photoDot, k === i && s.photoDotOn]} />)}</View>
+      </>}
+    </View>
+  );
+}
+
+function StayTile({ l, width, onPress }) {
+  return (
+    <TouchableOpacity style={[s.stayTile, { width }]} activeOpacity={0.85} onPress={onPress} accessibilityRole="button">
+      <View style={s.tileImageWrap}>
+        <Photo uris={l.photos && l.photos.length ? l.photos : (l.photo ? [l.photo] : [])} compact />
+        {l.featured ? <View style={s.tileFeatured}><Text style={s.tileFeaturedText}>Featured</Text></View> : null}
+      </View>
+      <View style={s.tileInfo}>
+        <View style={s.tileTitleRow}>
+          <Text style={s.tileTitle} numberOfLines={1}>{l.name}</Text>
+          {l.star_rating ? <Text style={s.tileStars}>{'\u2605'} {l.star_rating}-star</Text> : null}
+        </View>
+        <Text style={s.tileLocation} numberOfLines={1}>{l.location}</Text>
+        <View style={s.tileAmenityRow}>
+          {l.serves_breakfast ? <Text style={s.tileAmenity}>{'\u2615'} Breakfast</Text> : null}
+          {l.has_pool ? <Text style={s.tileAmenity}>{'\u2248'} Pool</Text> : null}
+        </View>
+        <Text style={s.tilePrice}>{peso(l.price)} <Text style={s.tilePerNight}>/ night</Text></Text>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
+function Stay({ l, onBack, onDone, onPayment }) {
+  const [i, setI] = useState('');
+  const [o, setO] = useState('');
+  const [requested, setRequested] = useState(false);
+  const today = iso(new Date());
+  const minIn = l.available_from && l.available_from > today ? l.available_from : today;
+  const minOut = iso(addDays(parseD(i || minIn), 1));
+  const booked = l.booked || [];
+  const nextStart = i ? booked.map((b) => b[0]).filter((a) => a >= i).sort()[0] : undefined; // next booking after your check-in
+  const maxOut = [l.available_to, nextStart].filter(Boolean).sort()[0];
+  const nights = i && o ? Math.round((parseD(o) - parseD(i)) / 86400000) : 0;
+  const go = async () => {
+    if (!i || !o) {
+      Alert.alert('Choose your dates', 'Select check-in and check-out dates before requesting a booking.');
+      return;
+    }
+    try {
+      await call('/bookings', 'POST', { listing_id: l.id, check_in: i, check_out: o });
+      setI(''); setO(''); setRequested(true); onDone();
+    } catch (e) { Alert.alert('Could not send request', e.message); }
+  };
+  return (
+    <View>
+      <View style={s.row2}><Btn t="Back to hotels" onPress={onBack} /></View>
+      <Card>
+        <Photo uris={l.photos && l.photos.length ? l.photos : (l.photo ? [l.photo] : [])} />
+        <View style={s.row}><Text style={s.detailTitle}>{l.name}</Text><Badge t={l.type} /></View>
+        <Text style={s.detailLocation}>{l.location}, Cagayan de Oro</Text>
+        <View style={s.row2}>
+          {l.featured ? <Badge t="Featured" k="ok" /> : null}
+          {l.star_rating ? <Badge t={`${l.star_rating}-star`} /> : null}
+          {l.serves_breakfast ? <Badge t="Breakfast available" /> : null}
+          {l.has_pool ? <Badge t="Swimming pool" /> : null}
+        </View>
+        <Text style={s.price}>{peso(l.price)} <Text style={s.mu}>per night</Text></Text>
+        <Text style={s.mu}>Available: {l.availability}</Text>
+        <View style={s.bookingDetails}>
+          <Text style={s.bold}>Booking details</Text>
+          <Text style={s.mu}>Check-in: 2:00 PM</Text>
+          <Text style={s.mu}>Check-out: 11:00 AM</Text>
+          <DateField label="Check-in date" value={i} min={minIn} max={l.available_to || undefined} blocked={booked} onChange={(v) => { setI(v); setO(''); }} />
+          <DateField label="Check-out date" value={o} min={minOut} max={maxOut} onChange={setO} />
+          {nextStart ? <Text style={s.mu}>Latest check-out: {pretty(maxOut)} (next booking starts then)</Text> : null}
+          {nights > 0 ? <Text style={s.estimate}>Estimated total: {peso(l.price * nights)} for {nights} {nights === 1 ? 'night' : 'nights'}</Text> : null}
+        </View>
+        <Btn p t="Request booking" onPress={go} />
+        {requested && <View style={s.paymentNotice}><Text style={s.paymentNoticeText}>Booking request sent. Submit payment from My bookings so it can be reviewed.</Text><Btn t="Go to My bookings" onPress={onPayment} /></View>}
+      </Card>
+    </View>
+  );
+}
+
+const STAY_FILTERS = [
+  { label: 'All stays', icon: '\u25C7' },
+  { label: 'Hotels', icon: '\u2302' },
+  { label: 'Featured', icon: '\u2728' },
+  { label: '5-star', icon: '\u2605' },
+  { label: 'Breakfast', icon: '\u2615' },
+  { label: 'Pools', icon: '\u2248' },
+];
+
+function Stays({ onPayment }) {
+  const h = useLoad('/listings');
+  const [filter, setFilter] = useState('All stays');
+  const [selectedId, setSelectedId] = useState(null);
+  const { width } = useWindowDimensions();
+  const columns = width >= 1200 ? 4 : width >= 760 ? 3 : 2;
+  const tileWidth = columns === 4 ? '23%' : columns === 3 ? '31%' : '47%';
+  const matches = (listing) => {
+    if (filter === 'Hotels') return listing.type === 'Hotel';
+    if (filter === 'Featured') return listing.featured;
+    if (filter === '5-star') return listing.star_rating === 5;
+    if (filter === 'Breakfast') return listing.serves_breakfast;
+    if (filter === 'Pools') return listing.has_pool;
+    return true;
+  };
+  const listings = h.data ? h.data[0].filter(matches).sort((a, b) => Number(b.featured) - Number(a.featured)) : [];
+  const selected = listings.find((listing) => listing.id === selectedId);
+  return (
+    <Page key={selected ? `stay-${selected.id}` : 'stay-grid'} title={selected ? 'Hotel details' : 'Find a stay'} sub={selected ? 'Review the details and choose your dates.' : 'Hotels and stays in Cagayan de Oro.'} hook={h}>
+      {h.data && (selected
+        ? <Stay key={selected.id} l={selected} onBack={() => setSelectedId(null)} onDone={h.silent} onPayment={onPayment} />
+        : <>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.categoryRail}>
+            {STAY_FILTERS.map((item) => {
+              const active = filter === item.label;
+              return (
+                <TouchableOpacity key={item.label} style={[s.categoryTab, active && s.categoryTabOn]} onPress={() => setFilter(item.label)} accessibilityRole="tab" accessibilityState={{ selected: active }}>
+                  <Text style={[s.categoryIcon, active && s.categoryIconOn]}>{item.icon}</Text>
+                  <Text style={[s.categoryLabel, active && s.categoryLabelOn]}>{item.label}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+          {listings.length
+            ? <View style={s.stayGrid}>
+              {listings.map((l) => <StayTile key={l.id} l={l} width={tileWidth} onPress={() => setSelectedId(l.id)} />)}
+            </View>
+            : <Empty t={filter === 'All stays' ? 'No listings are open right now.' : `No listings match the ${filter} category yet.`} />}
+        </>)}
+    </Page>
+  );
+}
+function PaymentForm({ booking, onSubmitted }) {
+  const [method, setMethod] = useState('bank_transfer');
+  const [reference, setReference] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [waiting, setWaiting] = useState(false);
+  const [other, setOther] = useState(false);
+  const done = React.useRef(onSubmitted);
+  done.current = onSubmitted;
+
+  // Asks the server (which asks HitPay) whether the money has arrived.
+  const check = useCallback(async () => {
+    try {
+      const b = await call(`/bookings/${booking.id}/payment/status`);
+      if (b.payment_status === 'verified') { setWaiting(false); done.current(); }
+    } catch (e) { /* try again on the next tick */ }
+  }, [booking.id]);
+
+  useEffect(() => {
+    if (!waiting) return undefined;
+    const timer = setInterval(check, 4000);
+    const stop = setTimeout(() => setWaiting(false), 10 * 60 * 1000);
+    return () => { clearInterval(timer); clearTimeout(stop); };
+  }, [waiting, check]);
+
+  const payOnline = async () => {
+    setBusy(true); setError('');
+    // On the web, open the tab right away so the browser does not block the pop-up.
+    const win = Platform.OS === 'web' && typeof window !== 'undefined' ? window.open('', '_blank') : null;
+    try {
+      const r = await call(`/bookings/${booking.id}/pay`, 'POST');
+      if (win) win.location.href = r.checkout_url;
+      else if (Platform.OS === 'web') window.location.href = r.checkout_url;
+      else await Linking.openURL(r.checkout_url);
+      setWaiting(true);
+    } catch (e) { if (win) win.close(); setError(e.message); }
+    setBusy(false);
+  };
+
+  const submit = async () => {
+    setBusy(true); setError('');
+    try {
+      await call(`/bookings/${booking.id}/payment`, 'PUT', { payment_method: method, payment_reference: reference.trim() || null });
+      onSubmitted();
+    } catch (e) { setError(e.message); }
+    setBusy(false);
+  };
+
+  return (
+    <View style={s.paymentBox}>
+      <Text style={s.bold}>Payment</Text>
+      <Text style={s.mu}>Total: {peso(booking.total)}</Text>
+      <Text style={s.mu}>Pay securely online. Your payment is confirmed automatically - no reference number needed.</Text>
+      {error ? <Text style={s.err}>{error}</Text> : null}
+      <Btn p t={busy ? 'Opening...' : `Pay ${peso(booking.total)} online`} onPress={payOnline} />
+      {waiting && (
+        <View style={s.paymentNotice}>
+          <Text style={s.mu}>Waiting for your payment to be confirmed. This page updates by itself.</Text>
+          <Btn t="I've paid - check now" onPress={check} />
+        </View>
+      )}
+      <TouchableOpacity onPress={() => setOther(!other)}>
+        <Text style={s.mu}>{other ? 'Hide other ways to pay' : 'Other ways to pay (bank transfer or cash)'}</Text>
+      </TouchableOpacity>
+      {other && (
+        <>
+          <View style={s.row2}>
+            {[['bank_transfer', 'Bank transfer'], ['cash', 'Cash']].map(([value, label]) => (
+              <TouchableOpacity key={value} style={[s.chip, method === value && s.chipOn]} onPress={() => setMethod(value)}>
+                <Text style={[s.chipT, method === value && { color: '#fff' }]}>{label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          {method === 'cash' ? (
+            <Text style={s.mu}>Pay the host in person and request a receipt. The booking stays unapproved until an admin verifies that payment was received.</Text>
+          ) : (
+            <>
+              <Text style={s.mu}>Pay using details provided by the host through a verified channel, then enter your transaction reference. Never share your PIN or OTP.</Text>
+              <TextInput style={s.input} placeholder="Transaction reference" value={reference} onChangeText={setReference} />
+            </>
+          )}
+          <Text style={s.paymentSafety}>These are verified manually by an admin. Do not send money to unverified accounts.</Text>
+          <Btn t={busy ? 'Submitting...' : 'Submit payment for verification'} onPress={submit} />
+        </>
+      )}
+    </View>
+  );
+}
+function MyBookings() {
+  const h = useLoad('/bookings');
+  return (
+    <Page title="My bookings" sub="Your door code appears once a booking is approved." hook={h}>
+      {h.data && (h.data[0].length ? h.data[0].map((b) => (
+        <Card key={b.id}>
+          <View style={s.row}><Text style={s.bold}>{b.listing}</Text><Badge t={b.flag && b.status === 'Flagged' ? 'Under review' : cap(b.status)} k={kind(b.status)} /></View>
+          <Text style={s.mu}>{b.dates}</Text>
+          <Text style={s.mu}>Total: {peso(b.total)} ({b.nights} {b.nights === 1 ? 'night' : 'nights'})</Text>
+          {b.code ? <Text style={s.code}>Door code: {b.code}</Text> : null}
+          {b.payment_status !== 'unpaid' && <Text style={s.mu}>Payment: {b.payment_status === 'pending_verification' ? 'Awaiting admin verification' : cap(b.payment_status)}{b.payment_method ? ` via ${b.payment_method.replace('_', ' ')}` : ''}</Text>}
+          {b.refund_status === 'due' && <Text style={s.refundNotice}>Refund due: an admin must process this refund manually.</Text>}
+          {b.refund_status === 'refunded' && <Text style={s.mu}>Refund marked as processed.</Text>}
+          {b.payment_status === 'unpaid' && ['Pending', 'Flagged'].includes(b.status) && <PaymentForm booking={b} onSubmitted={h.silent} />}
+          {['Pending', 'Flagged'].includes(b.status) && (
+            <View style={s.row2}><Btn t="Cancel request" onPress={() => ask('Cancel this request?', () => run(() => call(`/bookings/${b.id}`, 'PATCH'), h))} /></View>
+          )}
+        </Card>
+      )) : <Empty t="No bookings yet. Request dates on the Stays tab." />)}
+    </Page>
+  );
+}
+
+// ---------- Host ----------
+function Requests() {
+  const h = useLoad(['/bookings', '/host/listings']);
+  const [bk, ls] = h.data || [[], []];
+  const now = new Date();
+  const pending = bk.filter((b) => b.status === 'Pending');
+  const checkedIn = bk.filter((b) => b.status === 'Approved' && b.access === 'active' && new Date(b.check_in) <= now && new Date(b.check_out) >= now).length;
+  return (
+    <Page title="Booking requests" sub="Review new requests for your listings." hook={h}>
+      {h.data && <>
+        <Stats items={[['Pending', pending.length], ['Checked in', checkedIn], ['Low battery', ls.filter((l) => l.battery < 20).length]]} />
+        {pending.length ? pending.map((b) => <BookingCard key={b.id} b={b} hook={h} role="Host" />) : <Empty t="No pending requests. New requests will show up here." />}
+      </>}
+    </Page>
+  );
+}
+function ListingForm({ l, onSave, onCancel }) {
+  const [name, setName] = useState(l ? l.name : '');
+  const [type, setType] = useState(l ? l.type : 'Hotel');
+  const [location, setLocation] = useState(l && l.location ? l.location : '');
+  const [price, setPrice] = useState(l ? String(l.price) : '');
+  const [from, setFrom] = useState(l && l.available_from ? l.available_from : '');
+  const [to, setTo] = useState(l && l.available_to ? l.available_to : '');
+  const [status, setStatus] = useState(l ? l.status : 'active');
+  const [photos, setPhotos] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const choosePhotos = async () => {
+    try {
+      if (Platform.OS !== 'web') {
+        const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (!permission.granted) {
+          Alert.alert('Photo access needed', 'Allow photo library access to choose listing photos.');
+          return;
+        }
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsMultipleSelection: true,
+        selectionLimit: 8,
+        quality: 0.85,
+      });
+      if (!result.canceled) setPhotos(result.assets.slice(0, 8));
+    } catch (e) {
+      Alert.alert('Could not choose photos', e.message);
+    }
+  };
+  const save = async () => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      const body = { name, type, location, price: parseInt(price, 10), available_from: from || null, available_to: to || null, status };
+      const saved = l ? await call(`/host/listings/${l.id}`, 'PUT', body) : await call('/host/listings', 'POST', body);
+      if (photos.length) {
+        try {
+          await uploadPhotos(`/host/listings/${saved.id}/photos`, photos);
+        } catch (e) {
+          Alert.alert('Listing saved, but photos could not be uploaded', e.message);
+          onSave();
+          return;
+        }
+      }
+      onSave();
+    } catch (e) {
+      Alert.alert('Could not save listing', e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Card>
+      <Text style={s.bold}>{l ? 'Edit listing' : 'Add listing'}</Text>
+      <TextInput style={s.input} placeholder="Property name" value={name} onChangeText={setName} />
+      <Text style={s.mu}>Property type</Text>
+      <View style={s.row2}>
+        {TYPES.map((t) => (
+          <TouchableOpacity key={t} style={[s.chip, type === t && s.chipOn]} onPress={() => setType(t)}>
+            <Text style={[s.chipT, type === t && { color: '#fff' }]}>{t}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+      <TextInput style={s.input} placeholder="Area in Cagayan de Oro (e.g. Carmen)" value={location} onChangeText={setLocation} />
+      <TextInput style={s.input} placeholder="Price per night (PHP)" value={price} onChangeText={setPrice} keyboardType="number-pad" />
+      <DateField label="Available from (optional)" value={from} onChange={setFrom} clearable />
+      <DateField label="Available until (optional)" value={to} min={from || undefined} onChange={setTo} clearable />
+      <Text style={s.mu}>Listing photos (up to 8, JPG/PNG/WebP, 5 MB each). Choosing photos replaces the uploaded gallery.</Text>
+      <View style={s.row2}>
+        <Btn t="Choose photos" onPress={choosePhotos} />
+        {photos.length > 0 && <Btn t={`Clear selection (${photos.length})`} onPress={() => setPhotos([])} />}
+      </View>
+      {photos.length > 0 ? (
+        <View style={s.photoPreviewRow}>
+          {photos.map((photo) => <Image key={photo.uri} source={{ uri: photo.uri }} style={s.photoPreview} />)}
+        </View>
+      ) : l && l.photos && l.photos.length > 0 ? (
+        <Photo uris={l.photos} />
+      ) : l && l.photo ? (
+        <Photo uris={[l.photo]} />
+      ) : null}
+      <View style={s.row2}>
+        <Btn t={status === 'active' ? 'Status: Active (tap to pause)' : 'Status: Paused (tap to activate)'} onPress={() => setStatus(status === 'active' ? 'paused' : 'active')} />
+      </View>
+      <View style={s.row2}>
+        <Btn p t={saving ? (photos.length ? 'Saving & uploading…' : 'Saving…') : l ? 'Save changes' : 'Add listing'} onPress={save} />
+        <Btn t="Cancel" onPress={onCancel} />
+      </View>
+    </Card>
+  );
+}
+function HostListings() {
+  const h = useLoad('/host/listings');
+  const [adding, setAdding] = useState(false);
+  const [editId, setEditId] = useState(null);
+  const done = () => { setAdding(false); setEditId(null); h.silent(); };
+  const list = h.data ? h.data[0] : [];
+  return (
+    <Page title="Listings" sub="Add, edit, pause or remove your properties." hook={h}>
+      {h.data && <>
+        {adding ? <ListingForm onSave={done} onCancel={() => setAdding(false)} /> : <Btn p t="Add listing" onPress={() => { setEditId(null); setAdding(true); }} />}
+        <View style={{ height: 12 }} />
+        {list.length ? list.map((l) => editId === l.id ? (
+          <ListingForm key={l.id} l={l} onSave={done} onCancel={() => setEditId(null)} />
+        ) : (
+          <Card key={l.id}>
+            <Photo uris={l.photos && l.photos.length ? l.photos : (l.photo ? [l.photo] : [])} />
+            <View style={s.row}><Text style={s.bold}>{l.name}</Text><Badge t={cap(l.status)} k={l.status === 'active' ? 'ok' : ''} /></View>
+            <Text style={s.mu}>{l.type} - {l.location}, Cagayan de Oro</Text>
+            <Text style={s.mu}>{peso(l.price)} per night - {l.availability}</Text>
+            <View style={s.row2}>
+              <Btn t="Edit" onPress={() => { setAdding(false); setEditId(l.id); }} />
+              <Btn t="Delete" onPress={() => ask('Delete ' + l.name + '?', () => run(() => call(`/host/listings/${l.id}`, 'DELETE'), h))} />
+            </View>
+          </Card>
+        )) : <Empty t="No listings yet. Add your first property to start receiving requests." />}
+      </>}
+    </Page>
+  );
+}
+function Doorlock() {
+  const [sel, setSel] = useState(null);
+  const h = useLoad(['/host/listings', '/host/doorlock' + (sel ? '?listing=' + sel : '')]);
+  const ls = h.data ? h.data[0] : [];
+  const d = h.data && h.data[1];
+  return (
+    <Page title="Doorlock" sub={d && d.listing ? d.listing.name : 'Battery, access, and activity.'} hook={h}>
+      {d && !d.listing && <Empty t="Add a listing first. Each listing has its own smart lock." />}
+      {d && d.listing && <>
+        {ls.length > 1 && (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
+            {ls.map((l) => {
+              const on = d.listing.id === l.id;
+              return (
+                <TouchableOpacity key={l.id} style={[s.chip, on && s.chipOn]} onPress={() => setSel(l.id)}>
+                  <Text style={[s.chipT, on && { color: '#fff' }]}>{l.name}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        )}
+        {d.listing.battery < 20 && (
+          <View style={s.alert}>
+            <Text style={{ color: '#c2321b', fontWeight: '600' }}>Battery is below 20%. Replace it soon so guests are not locked out.</Text>
+            <Btn p t="Mark battery replaced" onPress={() => run(() => call(`/host/doorlock/${d.listing.id}/battery-replaced`, 'POST'), h)} />
+          </View>
+        )}
+        <Stats items={[['Battery', d.listing.battery + '%'], ['Lock', 'Locked']]} />
+        <Text style={s.h2}>Guest access</Text>
+        {d.access.length ? d.access.map((a) => (
+          <Card key={a.id}>
+            <View style={s.row}><Text style={s.bold}>{a.guest}</Text><Badge t={a.access === 'active' ? 'Active' : 'Removed'} k={a.access === 'active' ? 'ok' : ''} /></View>
+            <Text style={s.mu}>{a.dates}</Text>
+            {a.access === 'active' && <View style={s.row2}><Btn t="Remove access" onPress={() => ask('Remove access for ' + a.guest + '?', () => run(() => call(`/host/access/${a.id}/remove`, 'POST'), h))} /></View>}
+          </Card>
+        )) : <Empty t="No guests have access yet. Approved bookings get a code automatically." />}
+        <Text style={s.h2}>Lock event log</Text>
+        {d.events.length ? d.events.map((e) => (
+          <Card key={e.id}><View style={s.row}><Text style={{ flex: 1 }}>{e.event}</Text><Badge t={cap(e.result)} k={kind(e.result)} /></View><Text style={s.mu}>{e.time}</Text></Card>
+        )) : <Empty t="No lock activity yet." />}
+        <Text style={s.mu}>You are notified only for repeated failed attempts and battery below 20%.</Text>
+      </>}
+    </Page>
+  );
+}
+
+// ---------- Admin ----------
+function AdminPending() {
+  const h = useLoad(['/admin/metrics', '/bookings']);
+  const m = h.data && h.data[0];
+  const list = h.data ? h.data[1].filter((b) => b.status === 'Pending') : [];
+  return (
+    <Page title="Pending bookings" sub="Approve or cancel bookings waiting for review." hook={h}>
+      {m && <>
+        <Stats items={[['Pending', m.pending], ['Approved today', m.approved_today], ['Cancelled today', m.cancelled_today]]} />
+        {list.length ? list.map((b) => <BookingCard key={b.id} b={b} hook={h} role="Admin" />) : <Empty t="Nothing waiting for review." />}
+      </>}
+    </Page>
+  );
+}
+function Flagged() {
+  const h = useLoad('/bookings');
+  const list = h.data ? h.data[0].filter((b) => b.status === 'Flagged') : [];
+  return (
+    <Page title="Flagged bookings" sub="First bookings and last-minute requests need an admin." hook={h}>
+      {h.data && (list.length ? list.map((b) => <BookingCard key={b.id} b={b} hook={h} role="Admin" />) : <Empty t="No flagged bookings." />)}
+    </Page>
+  );
+}
+function AdminPayments() {
+  const h = useLoad('/bookings');
+  const items = h.data ? h.data[0].filter((b) => b.payment_status === 'pending_verification' || b.refund_status === 'due') : [];
+  return (
+    <Page title="Payments & refunds" sub="Verify guest payments before a booking is approved. Process due refunds manually." hook={h}>
+      {h.data && (items.length ? items.map((b) => (
+        <Card key={b.id}>
+          <View style={s.row}><Text style={s.bold}>{b.guest} - {b.listing}</Text><Badge t={b.refund_status === 'due' ? 'Refund due' : 'Verify payment'} k={b.refund_status === 'due' ? 'bad' : 'w'} /></View>
+          <Text style={s.mu}>{b.dates} - {peso(b.total)} ({b.nights} {b.nights === 1 ? 'night' : 'nights'})</Text>
+          <Text style={s.mu}>Booking: {b.status} - Method: {b.payment_method ? b.payment_method.replace('_', ' ') : 'Not set'}</Text>
+          {b.payment_reference ? <Text style={s.mu}>Reference: {b.payment_reference}</Text> : null}
+          {b.payment_status === 'pending_verification' && <View style={s.paymentNotice}>
+            <Text style={s.paymentSafety}>Confirm the payment independently with the provider or host before marking it verified.</Text>
+            <Btn p t="Mark payment verified" onPress={() => run(() => call(`/admin/bookings/${b.id}/payment/verify`, 'POST'), h)} />
+          </View>}
+          {b.refund_status === 'due' && <View style={s.paymentNotice}>
+            <Text style={s.refundNotice}>Confirm the money was received and manually returned before marking this refund complete.</Text>
+            <Btn t="Mark refund processed" onPress={() => ask('Confirm that this refund was manually sent?', () => run(() => call(`/admin/bookings/${b.id}/refund/complete`, 'POST'), h))} />
+          </View>}
+        </Card>
+      )) : <Empty t="No payments need verification and no refunds are due." />)}
+    </Page>
+  );
+}
+function AdminSms() {
+  const h = useLoad('/bookings');
+  const failed = h.data ? h.data[0].filter((b) => b.decision_sms_status === 'failed') : [];
+  const resend = async (booking) => {
+    try {
+      const result = await call(`/admin/bookings/${booking.id}/sms/resend`, 'POST');
+      h.silent();
+      if (!result.sms.sent) Alert.alert('SMS notification failed', result.sms.message);
+    } catch (e) { Alert.alert('Could not resend SMS', e.message); }
+  };
+  return (
+    <Page title="SMS notifications" sub="Review and retry decision texts that could not be sent." hook={h}>
+      {h.data && (failed.length ? failed.map((b) => (
+        <Card key={b.id}>
+          <View style={s.row}><Text style={s.bold}>{b.guest} - {b.listing}</Text><Badge t={cap(b.status)} k={kind(b.status)} /></View>
+          <Text style={s.mu}>{b.dates} - SMS failed</Text>
+          <Btn t="Retry SMS" onPress={() => resend(b)} />
+        </Card>
+      )) : <Empty t="No failed decision SMS notifications." />)}
+    </Page>
+  );
+}
+function Users() {
+  const h = useLoad('/admin/users');
+  return (
+    <Page title="Users" sub="Disable or enable guest and host accounts." hook={h}>
+      {h.data && h.data[0].map((u) => (
+        <Card key={u.id}>
+          <View style={s.row}><Text style={s.bold}>{u.name}</Text><Badge t={u.active ? 'Active' : 'Disabled'} k={u.active ? 'ok' : 'bad'} /></View>
+          <Text style={s.mu}>{u.role} - {u.email}</Text>
+          {u.phone ? <Text style={s.mu}>{u.phone}</Text> : null}
+          {u.role !== 'Admin' && (
+            <View style={s.row2}>
+              {u.active
+                ? <Btn t="Disable" onPress={() => ask('Disable ' + u.name + '?', () => run(() => call(`/admin/users/${u.id}`, 'PATCH'), h))} />
+                : <Btn t="Enable" onPress={() => run(() => call(`/admin/users/${u.id}`, 'PATCH'), h)} />}
+            </View>
+          )}
+        </Card>
+      ))}
+    </Page>
+  );
+}
+
+// ---------- Login / register + shell ----------
+function Login({ onDone, desktop }) {
+  const { width } = useWindowDimensions();
+  const compactHeader = Platform.OS !== 'web' || width < 720;
+  const [page, setPage] = useState('home');
+  const [authMode, setAuthMode] = useState(null);
+  const reg = authMode === 'register';
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [codeInputs, setCodeInputs] = useState({});
-
-  const activeBookings = useMemo(
-    () => bookings.filter((booking) => booking.status !== 'Denied').length,
-    [bookings],
-  );
-
-  const signIn = () => {
-    const account = accounts.find(
-      (item) => item.email.toLowerCase() === email.trim().toLowerCase() && item.password === password,
-    );
-    if (!account) {
-      Alert.alert('Sign in failed', 'Check your email and password, then try again.');
+  const [phone, setPhone] = useState('');
+  const [pw, setPw] = useState('');
+  const [show, setShow] = useState(false);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const go = async () => {
+    if (!email.trim() || !pw || (reg && (!name.trim() || !/^9\d{9}$/.test(phone)))) {
+      setErr(reg && !/^9\d{9}$/.test(phone) ? 'Enter a 10-digit Philippine mobile number starting with 9.' : 'Please fill in all the fields.');
       return;
     }
-    if (!account.active) {
-      Alert.alert('Account disabled', 'Please contact a DoorKey administrator.');
-      return;
-    }
-    setUser(account);
-    setScreen('app');
-    setPassword('');
+    setBusy(true); setErr('');
+    try {
+      const d = reg
+        ? await call('/register', 'POST', { name: name.trim(), email: email.trim(), password: pw, phone: `+63${phone}` })
+        : await call('/login', 'POST', { email: email.trim(), password: pw });
+      TOKEN = d.token; onDone(d.user);
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
   };
-
-  const registerGuest = () => {
-    const cleanName = name.trim();
-    const cleanEmail = email.trim().toLowerCase();
-    if (!cleanName || !cleanEmail || !password) {
-      Alert.alert('Missing information', 'Enter your name, email, and password to register.');
-      return;
+  const chooseMode = (register) => {
+    setAuthMode(register ? 'register' : 'login');
+    setErr('');
+  };
+  const showHome = () => {
+    setPage('home');
+    setAuthMode(null);
+    setErr('');
+  };
+  const showInfo = () => {
+    setPage('info');
+    setAuthMode(null);
+    setErr('');
+  };
+  const story = page === 'info'
+    ? {
+      eyebrow: 'ABOUT LOCKBAY',
+      title: 'A clear, convenient way to book local stays.',
+      description: 'LockBay is a Cagayan de Oro hotel discovery and booking-request app. Browse local listings, compare amenities and prices, choose your dates, and keep track of your requests in one place.',
+      points: ['Browse local stays and amenities', 'Compare prices and availability', 'Track your booking requests'],
     }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
-      Alert.alert('Invalid email', 'Enter a valid email address.');
-      return;
-    }
-    if (password.length < 6) {
-      Alert.alert('Password too short', 'Use at least 6 characters for this demo account.');
-      return;
-    }
-    if (accounts.some((item) => item.email.toLowerCase() === cleanEmail)) {
-      Alert.alert('Account exists', 'An account already uses this email. Please sign in.');
-      return;
-    }
-
-    const newAccount = {
-      id: makeId(),
-      name: cleanName,
-      email: cleanEmail,
-      password,
-      role: 'Guest',
-      active: true,
+    : {
+      eyebrow: 'A SMARTER WAY TO STAY',
+      title: 'Your stay in Cagayan de Oro.',
+      description: 'Browse local hotels, compare amenities, and check your dates before sending a booking request.',
+      points: ['Explore local stays', 'Choose your dates', 'Request your booking'],
     };
-    setAccounts((current) => [...current, newAccount]);
-    setUser(newAccount);
-    setScreen('app');
-    setName('');
-    setPassword('');
-  };
-
-  const signOut = () => {
-    setUser(null);
-    setScreen('login');
-    setIsRegistering(false);
-    setEmail('');
-    setPassword('');
-  };
-
-  const bookListing = (listing) => {
-    if (bookings.some((booking) => booking.listingId === listing.id && booking.status !== 'Denied')) {
-      Alert.alert('Unavailable', 'This listing already has a booking in this demo. Try another home.');
-      return;
-    }
-    const booking = {
-      id: makeId(),
-      guestId: user.id,
-      guestName: user.name,
-      listingId: listing.id,
-      listingTitle: listing.title,
-      hostId: listing.hostId,
-      price: listing.price,
-      code: makeAccessCode(),
-      status: 'Pending',
-      goEnabled: false,
-    };
-    setBookings((current) => [...current, booking]);
-    Alert.alert('Booking requested', `${listing.title} is booked. Your access code is ${booking.code}.`);
-  };
-
-  const updateBooking = (bookingId, changes) => {
-    setBookings((current) => current.map((booking) => (
-      booking.id === bookingId ? { ...booking, ...changes } : booking
-    )));
-  };
-
-  const hostApprove = (booking) => {
-    const enteredCode = (codeInputs[booking.id] || '').trim();
-    if (enteredCode !== booking.code) {
-      Alert.alert('Code does not match', 'Enter the guest’s six-digit booking code to approve and enable Go.');
-      return;
-    }
-    updateBooking(booking.id, { status: 'Approved', goEnabled: true });
-    setCodeInputs((current) => ({ ...current, [booking.id]: '' }));
-    Alert.alert('Booking approved', 'The guest can now see and use the Go button.');
-  };
-
-  const adminSetBooking = (bookingId, status) => {
-    updateBooking(bookingId, { status, goEnabled: status === 'Approved' });
-  };
-
-  const adminDeleteBooking = (bookingId) => {
-    Alert.alert('Remove booking?', 'This permanently removes the booking from this demo session.', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Remove',
-        style: 'destructive',
-        onPress: () => setBookings((current) => current.filter((booking) => booking.id !== bookingId)),
-      },
-    ]);
-  };
-
-  const toggleAccount = (accountId) => {
-    if (accountId === user.id) {
-      Alert.alert('Action unavailable', 'You cannot disable the account you are currently using.');
-      return;
-    }
-    setAccounts((current) => current.map((account) => (
-      account.id === accountId ? { ...account, active: !account.active } : account
-    )));
-  };
-
-  const renderLogin = () => (
-    <View style={styles.panel}>
-      <View style={styles.introCard}>
-        <Text style={styles.eyebrow}>Smart stay platform</Text>
-        <Text style={styles.title}>Welcome to DoorKey</Text>
-        <Text style={styles.bodyText}>Sign in to continue. Guests can create an account; host and admin access is provided for this demo.</Text>
-      </View>
-      {isRegistering && (
-        <Field label="Full name" value={name} onChangeText={setName} placeholder="Your name" />
-      )}
-      <Field label="Email" value={email} onChangeText={setEmail} placeholder="you@example.com" keyboardType="email-address" />
-      <Field label="Password" value={password} onChangeText={setPassword} placeholder="At least 6 characters" secureTextEntry />
-      <ActionButton label={isRegistering ? 'Create guest account' : 'Sign in'} onPress={isRegistering ? registerGuest : signIn} />
-      <ActionButton
-        label={isRegistering ? 'I already have an account' : 'Register as a guest'}
-        onPress={() => setIsRegistering((current) => !current)}
-        variant="secondary"
-      />
-      <View style={styles.demoCard}>
-        <Text style={styles.sectionTitle}>Demo accounts</Text>
-        <Text style={styles.bodyText}>Host: host@doorkey.demo · password: host123</Text>
-        <Text style={styles.bodyText}>Admin: admin@doorkey.demo · password: admin123</Text>
-      </View>
-      <Text style={styles.noticeText}>Demo only: accounts and bookings are held in memory and reset when the app restarts. Use a secure backend before real use.</Text>
-    </View>
-  );
-
-  const renderGuest = () => {
-    const myBookings = bookings.filter((booking) => booking.guestId === user.id);
-    return (
-      <View style={styles.panel}>
-        <Text style={styles.sectionTitle}>Browse stays</Text>
-        {listings.map((listing) => (
-          <View key={listing.id} style={styles.card}>
-            <View style={styles.row}>
-              <Text style={styles.cardTitle}>{listing.title}</Text>
-              <Text style={styles.price}>${listing.price}/night</Text>
-            </View>
-            <Text style={styles.subtleText}>{listing.city} · {listing.details}</Text>
-            <ActionButton
-              label={bookings.some((booking) => booking.listingId === listing.id && booking.status !== 'Denied') ? 'Unavailable' : 'Book this stay'}
-              onPress={() => bookListing(listing)}
-              disabled={bookings.some((booking) => booking.listingId === listing.id && booking.status !== 'Denied')}
-            />
-          </View>
-        ))}
-        <Text style={styles.sectionTitle}>My bookings</Text>
-        {myBookings.length === 0 ? (
-          <Text style={styles.emptyText}>Your bookings and access codes will appear here.</Text>
-        ) : myBookings.map((booking) => (
-          <View key={booking.id} style={styles.card}>
-            <View style={styles.row}>
-              <Text style={styles.cardTitle}>{booking.listingTitle}</Text>
-              <StatusBadge status={booking.status} />
-            </View>
-            {booking.status === 'Denied' ? (
-              <Text style={styles.subtleText}>This booking was denied. Contact support if you need help.</Text>
-            ) : (
-              <>
-                <Text style={styles.subtleText}>Your booking access code</Text>
-                <Text selectable style={styles.accessCode}>{booking.code}</Text>
-                {booking.goEnabled ? (
-                  <ActionButton
-                    label="Go — check in"
-                    onPress={() => Alert.alert('Check-in ready', `Your booking for ${booking.listingTitle} is approved.`)}
-                    variant="success"
-                  />
-                ) : (
-                  <Text style={styles.noticeText}>Waiting for your host to match the code and approve your booking.</Text>
-                )}
-              </>
-            )}
-          </View>
-        ))}
-      </View>
-    );
-  };
-
-  const renderHost = () => {
-    const hostBookings = bookings.filter((booking) => booking.hostId === user.email);
-    return (
-      <View style={styles.panel}>
-        <Text style={styles.sectionTitle}>Booking requests</Text>
-        <Text style={styles.subtleText}>Match the guest’s code with the code shown on their booking before approving.</Text>
-        {hostBookings.length === 0 ? (
-          <Text style={styles.emptyText}>New guest booking requests will appear here.</Text>
-        ) : hostBookings.map((booking) => (
-          <View key={booking.id} style={styles.card}>
-            <View style={styles.row}>
-              <Text style={styles.cardTitle}>{booking.listingTitle}</Text>
-              <StatusBadge status={booking.status} />
-            </View>
-            <Text style={styles.subtleText}>Guest: {booking.guestName}</Text>
-            <Text style={styles.subtleText}>Ask the guest to provide their six-digit code.</Text>
-            {booking.status === 'Pending' && (
-              <>
-                <Field
-                  label="Confirm guest code"
-                  value={codeInputs[booking.id] || ''}
-                  onChangeText={(value) => setCodeInputs((current) => ({ ...current, [booking.id]: value.replace(/\D/g, '').slice(0, 6) }))}
-                  placeholder="Enter 6-digit code"
-                  keyboardType="number-pad"
-                  maxLength={6}
-                />
-                <ActionButton label="Match code & approve" onPress={() => hostApprove(booking)} />
-                <ActionButton label="Deny booking" onPress={() => updateBooking(booking.id, { status: 'Denied', goEnabled: false })} variant="danger" />
-              </>
-            )}
-            {booking.status === 'Approved' && <Text style={styles.successText}>Approved — guest Go button enabled.</Text>}
-          </View>
-        ))}
-      </View>
-    );
-  };
-
-  const renderAdmin = () => (
-    <View style={styles.panel}>
-      <View style={styles.metricsGrid}>
-        <View style={styles.metricCard}><Text style={styles.metricLabel}>Bookings</Text><Text style={styles.metricValue}>{bookings.length}</Text></View>
-        <View style={styles.metricCard}><Text style={styles.metricLabel}>Active bookings</Text><Text style={styles.metricValue}>{activeBookings}</Text></View>
-        <View style={styles.metricCard}><Text style={styles.metricLabel}>Accounts</Text><Text style={styles.metricValue}>{accounts.length}</Text></View>
-        <View style={styles.metricCard}><Text style={styles.metricLabel}>Pending</Text><Text style={styles.metricValue}>{bookings.filter((booking) => booking.status === 'Pending').length}</Text></View>
-      </View>
-      <Text style={styles.sectionTitle}>All bookings</Text>
-      {bookings.length === 0 ? (
-        <Text style={styles.emptyText}>Bookings from all guests will appear here.</Text>
-      ) : bookings.map((booking) => (
-        <View key={booking.id} style={styles.card}>
-          <View style={styles.row}>
-            <Text style={styles.cardTitle}>{booking.listingTitle}</Text>
-            <StatusBadge status={booking.status} />
-          </View>
-          <Text style={styles.subtleText}>{booking.guestName} · Code {booking.code}</Text>
-          <View style={styles.buttonRow}>
-            <ActionButton label="Approve & enable Go" onPress={() => adminSetBooking(booking.id, 'Approved')} variant="success" />
-            <ActionButton label="Deny" onPress={() => adminSetBooking(booking.id, 'Denied')} variant="danger" />
-            <ActionButton label="Remove booking" onPress={() => adminDeleteBooking(booking.id)} variant="secondary" />
-          </View>
-        </View>
-      ))}
-      <Text style={styles.sectionTitle}>Account controls</Text>
-      {accounts.map((account) => (
-        <View key={account.id} style={styles.card}>
-          <View style={styles.row}>
-            <View>
-              <Text style={styles.cardTitle}>{account.name}</Text>
-              <Text style={styles.subtleText}>{account.email} · {account.role}</Text>
-            </View>
-            <Text style={account.active ? styles.successText : styles.deniedText}>{account.active ? 'Active' : 'Disabled'}</Text>
-          </View>
-          {account.id !== user.id && (
-            <ActionButton
-              label={account.active ? 'Disable account' : 'Enable account'}
-              onPress={() => toggleAccount(account.id)}
-              variant="secondary"
-            />
-          )}
-        </View>
-      ))}
-      <Text style={styles.noticeText}>Administrator actions here affect this demo session only.</Text>
-    </View>
-  );
-
-  if (screen === 'login') {
-    return (
-      <SafeAreaView style={styles.safeArea}>
-        <StatusBar style="light" />
-        <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-          {renderLogin()}
-        </ScrollView>
-      </SafeAreaView>
-    );
-  }
-
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar style="light" />
-      <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-        <View style={styles.header}>
-          <View>
-            <Text style={styles.eyebrow}>{user.role} account</Text>
-            <Text style={styles.title}>DoorKey</Text>
-            <Text style={styles.subtleText}>Signed in as {user.name}</Text>
+    <KeyboardAvoidingView style={[s.app, s.landingApp]} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <ScrollView contentContainerStyle={[s.landingScroll, !desktop && s.landingScrollMobile]} keyboardShouldPersistTaps="handled">
+        <View style={s.landingShell}>
+        <View style={[s.landingHeader, compactHeader && s.landingHeaderMobile]}>
+          <View style={s.landingBrand}>
+            <Logo size={38} />
+            <View>
+              <Text style={s.landingBrandName}>LockBay</Text>
+              <Text style={s.landingBrandTag}>STAYS IN CAGAYAN DE ORO</Text>
+            </View>
           </View>
-          <Pressable accessibilityRole="button" onPress={signOut} style={styles.signOut}>
-            <Text style={styles.signOutText}>Sign out</Text>
-          </Pressable>
+          <View style={[s.landingNav, compactHeader && s.landingNavMobile]}>
+            <TouchableOpacity style={[s.landingNavButton, compactHeader && s.landingNavButtonMobile, page === 'home' && !authMode && s.landingNavActive]} onPress={showHome} accessibilityRole="button">
+              <Text style={[s.landingNavText, page === 'home' && !authMode && s.landingNavTextActive]}>Home</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[s.landingNavButton, compactHeader && s.landingNavButtonMobile, page === 'info' && !authMode && s.landingNavActive]} onPress={showInfo} accessibilityRole="button">
+              <Text style={[s.landingNavText, page === 'info' && !authMode && s.landingNavTextActive]}>Info</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[s.landingNavButton, compactHeader && s.landingNavButtonMobile, authMode === 'login' && s.landingNavActive]} onPress={() => chooseMode(false)} accessibilityRole="button">
+              <Text style={[s.landingNavText, authMode === 'login' && s.landingNavTextActive]}>Log in</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[s.landingNavButton, compactHeader && s.landingNavButtonMobile, authMode === 'register' && s.landingNavActive]} onPress={() => chooseMode(true)} accessibilityRole="button">
+              <Text style={[s.landingNavText, authMode === 'register' && s.landingNavTextActive]}>Create account</Text>
+            </TouchableOpacity>
+          </View>
         </View>
-        <Text style={styles.greeting}>
-          {user.role === 'Guest' ? 'Find a stay and manage your access' : user.role === 'Host' ? 'Review and approve guest bookings' : 'Platform administration'}
-        </Text>
-        {user.role === 'Guest' && renderGuest()}
-        {user.role === 'Host' && renderHost()}
-        {user.role === 'Admin' && renderAdmin()}
+
+        <View style={[s.landingHero, desktop && s.landingHeroDesktop, desktop && !authMode && s.landingHeroSoloDesktop]}>
+          <Image source={LANDMARK_IMAGE} style={s.landingHeroImage} resizeMode="cover" />
+          <View style={s.landingHeroShade} />
+          <View style={[s.landingStoryPanel, desktop && s.landingStoryPanelDesktop]}>
+            <Text style={s.landingEyebrow}>{story.eyebrow}</Text>
+            <Text style={[s.landingTitle, desktop && s.landingTitleDesktop]}>{story.title}</Text>
+            <Text style={s.landingDescription}>{story.description}</Text>
+            <View style={s.landingPoints}>
+              {story.points.map((point, index) => (
+                <View style={s.landingPoint} key={point}>
+                  <Text style={s.landingPointNumber}>0{index + 1}</Text>
+                  <Text style={s.landingPointText}>{point}</Text>
+                </View>
+              ))}
+            </View>
+            {!authMode && <View style={s.landingIntroActions}>
+              <TouchableOpacity onPress={() => chooseMode(true)} accessibilityRole="button">
+                <Text style={s.landingIntroActionPrimary}>Create an account</Text>
+              </TouchableOpacity>
+              {page === 'home' && <TouchableOpacity onPress={showInfo} accessibilityRole="button">
+                <Text style={s.landingIntroActionSecondary}>Learn about LockBay</Text>
+              </TouchableOpacity>}
+            </View>}
+            {authMode && <TouchableOpacity onPress={showHome} accessibilityRole="button" style={s.landingBackLink}>
+              <Text style={s.landingBackLinkText}>Back to home</Text>
+            </TouchableOpacity>}
+          </View>
+
+          {authMode && <View style={[s.loginCard, s.landingAuthCard, !desktop && s.landingAuthCardMobile]}>
+            <Text style={s.authEyebrow}>{reg ? 'START PLANNING YOUR STAY' : 'WELCOME TO LOCKBAY'}</Text>
+            <Text style={s.authTitle}>{reg ? 'Create your account' : 'Welcome back'}</Text>
+            <Text style={s.authDescription}>{reg ? 'Sign up as a guest to book your stay.' : 'Log in to find your next stay.'}</Text>
+            {err ? <Text style={s.err}>{err}</Text> : null}
+            {reg && <>
+              <Text style={s.label}>Full name</Text>
+              <TextInput style={s.input} value={name} onChangeText={setName} autoComplete="name" />
+              <Text style={s.label}>Philippine mobile number</Text>
+              <View style={s.phoneRow}>
+                <Text style={s.phonePrefix}>+63</Text>
+                <TextInput style={[s.input, s.phoneInput]} value={phone} onChangeText={(value) => setPhone(value.replace(/\D/g, '').slice(0, 10))} keyboardType="phone-pad" autoComplete="tel" placeholder="9XX XXX XXXX" maxLength={10} />
+              </View>
+            </>}
+            <Text style={s.label}>Email</Text>
+            <TextInput style={s.input} value={email} onChangeText={setEmail} autoCapitalize="none" keyboardType="email-address" autoComplete="email" />
+            <Text style={s.label}>Password</Text>
+            <View style={s.pwRow}>
+              <TextInput style={[s.input, { flex: 1, marginVertical: 0, borderWidth: 0 }]} value={pw} onChangeText={setPw} secureTextEntry={!show} autoCapitalize="none" autoComplete="password" />
+              <TouchableOpacity onPress={() => setShow(!show)}><Text style={s.link}>{show ? 'Hide' : 'Show'}</Text></TouchableOpacity>
+            </View>
+            <View style={{ height: 14 }} />
+            <Btn p t={busy ? 'Please wait...' : reg ? 'Create account' : 'Log in'} onPress={go} />
+            <TouchableOpacity onPress={() => chooseMode(!reg)} style={s.authModeSwitch}>
+              <Text style={s.mu}>{reg ? 'Already have an account? ' : 'New to LockBay? '}<Text style={s.link}>{reg ? 'Log in' : 'Create an account'}</Text></Text>
+            </TouchableOpacity>
+          </View>}
+          <View style={s.landingPhotoCredit}>
+            <Text style={s.landingPhotoCreditText}>Gaston Park & City Hall · Photo: Patrick Roque · </Text>
+            <TouchableOpacity onPress={() => Linking.openURL(LANDMARK_SOURCE_URL)} accessibilityRole="link">
+              <Text style={s.landingPhotoCreditLink}>Wikimedia Commons</Text>
+            </TouchableOpacity>
+            <Text style={s.landingPhotoCreditText}> · </Text>
+            <TouchableOpacity onPress={() => Linking.openURL(LANDMARK_LICENSE_URL)} accessibilityRole="link">
+              <Text style={s.landingPhotoCreditLink}>CC BY-SA 4.0</Text>
+            </TouchableOpacity>
+            <Text style={s.landingPhotoCreditText}> · Cropped</Text>
+          </View>
+        </View>
+        <View style={[s.landingFooter, !desktop && s.landingFooterMobile]}>
+          <Text style={s.landingFooterTitle}>Your CDO stay, made simpler.</Text>
+          <Text style={s.landingFooterText}>See stay details, compare nightly prices, and check availability before you request a booking.</Text>
+        </View>
+        </View>
       </ScrollView>
-    </SafeAreaView>
+    </KeyboardAvoidingView>
   );
 }
 
-const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: '#0b1220' },
-  container: { flexGrow: 1, paddingHorizontal: 18, paddingVertical: 24 },
-  panel: { gap: 14 },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
-  eyebrow: { color: '#8fb4ff', fontSize: 12, letterSpacing: 1.5, textTransform: 'uppercase', marginBottom: 4 },
-  title: { color: '#f8fbff', fontSize: 28, fontWeight: '800' },
-  greeting: { color: '#dfeafc', fontSize: 18, fontWeight: '700', marginBottom: 18 },
-  introCard: { backgroundColor: '#111d2f', borderRadius: 18, padding: 18, borderWidth: 1, borderColor: '#1c2e4f', gap: 8, marginBottom: 4 },
-  bodyText: { color: '#c4d2e7', fontSize: 14, lineHeight: 20 },
-  fieldGroup: { gap: 7 },
-  fieldLabel: { color: '#c4d2e7', fontSize: 13, fontWeight: '700' },
-  input: { color: '#f8fbff', backgroundColor: '#121f36', borderWidth: 1, borderColor: '#2a3d5d', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, fontSize: 16 },
-  button: { minHeight: 46, justifyContent: 'center', alignItems: 'center', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, marginTop: 4 },
-  primaryButton: { backgroundColor: '#2d7df6' },
-  secondaryButton: { backgroundColor: '#1b2d48', borderWidth: 1, borderColor: '#294367' },
-  successButton: { backgroundColor: '#4ecb9a' },
-  dangerButton: { backgroundColor: '#652d3b' },
-  disabledButton: { opacity: 0.45 },
-  buttonText: { color: '#fff', fontWeight: '800', textAlign: 'center' },
-  secondaryButtonText: { color: '#edf5ff' },
-  signOut: { backgroundColor: '#1b2d48', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12 },
-  signOutText: { color: '#edf5ff', fontWeight: '700' },
-  demoCard: { backgroundColor: '#101b2e', borderRadius: 16, padding: 14, gap: 6, marginTop: 8 },
-  noticeText: { color: '#9eb0ca', fontSize: 12, lineHeight: 18, marginTop: 4 },
-  sectionTitle: { color: '#edf4ff', fontSize: 18, fontWeight: '700', marginTop: 6 },
-  card: { backgroundColor: '#111d2f', borderRadius: 18, padding: 16, borderWidth: 1, borderColor: '#1c2e4f', gap: 10 },
-  row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
-  cardTitle: { color: '#f2f7ff', fontSize: 17, fontWeight: '700', flexShrink: 1 },
-  price: { color: '#9be7c2', fontSize: 15, fontWeight: '800' },
-  subtleText: { color: '#aebfda', fontSize: 13, lineHeight: 19 },
-  statusBadge: { overflow: 'hidden', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 5, fontSize: 12, fontWeight: '800' },
-  pendingBadge: { color: '#ffd166', backgroundColor: '#332611' },
-  approvedBadge: { color: '#98edbf', backgroundColor: '#143326' },
-  deniedBadge: { color: '#ffb2b2', backgroundColor: '#3a2028' },
-  accessCode: { color: '#9be7c2', fontSize: 30, fontWeight: '900', letterSpacing: 8, paddingVertical: 2 },
-  successText: { color: '#98edbf', fontWeight: '700', fontSize: 14 },
-  deniedText: { color: '#ffb2b2', fontWeight: '700', fontSize: 14 },
-  emptyText: { color: '#9eb0ca', backgroundColor: '#111d2f', borderRadius: 14, padding: 16, lineHeight: 21 },
-  metricsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, justifyContent: 'space-between' },
-  metricCard: { width: '48%', borderRadius: 16, padding: 14, minHeight: 82, justifyContent: 'center', backgroundColor: '#12274e' },
-  metricLabel: { color: '#cfe2ff', fontSize: 12, marginBottom: 8 },
-  metricValue: { color: '#fff', fontSize: 24, fontWeight: '800' },
-  buttonRow: { gap: 8 },
+const TABS = {
+  Guest: [['Stays', Stays], ['My bookings', MyBookings]],
+  Host: [['Requests', Requests], ['Listings', HostListings], ['Doorlock', Doorlock]],
+  Admin: [['Pending', AdminPending], ['Flagged', Flagged], ['Payments', AdminPayments], ['SMS', AdminSms], ['Users', Users]],
+};
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [tab, setTab] = useState(0);
+  const { width } = useWindowDimensions();
+  const desktop = Platform.OS === 'web' && width >= 960;
+  if (!user) return <Login desktop={desktop} onDone={(u) => { setTab(0); setUser(u); }} />;
+  const tabs = TABS[user.role] || TABS.Guest;
+  const Screen = tabs[tab][1];
+  const out = async () => { try { await call('/logout', 'POST'); } catch (e) {} TOKEN = null; setUser(null); };
+  return (
+    <View style={[s.app, desktop && s.desktopApp]}>
+      {desktop ? (
+        <View style={s.desktopLayout}>
+          <View style={s.sidebar}>
+            <View style={s.brandRow}><Logo size={36} /><Text style={s.brandName}>LockBay</Text></View>
+            <Text style={s.sidebarLabel}>WORKSPACE</Text>
+            <View style={s.desktopNav}>
+              {tabs.map(([l], i) => (
+                <TouchableOpacity key={l} style={[s.desktopNavI, i === tab && s.desktopNavOn]} onPress={() => setTab(i)}>
+                  <Text style={[s.desktopNavT, i === tab && s.desktopNavTOn]}>{l}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <View style={s.sidebarAccount}>
+              <Text style={s.sidebarName}>{user.name || user.role}</Text>
+              <Text style={s.mu}>{user.role} account</Text>
+              <TouchableOpacity onPress={out} style={s.logoutButton}>
+                <Text style={s.logoutText}>Log out</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+          <View style={s.desktopMain}>
+            <View style={s.desktopHeader}>
+              <View>
+                <Text style={s.desktopEyebrow}>LOCKBAY / {user.role.toUpperCase()}</Text>
+                <Text style={s.desktopHeading}>{tabs[tab][0]}</Text>
+              </View>
+              <Text style={s.desktopStatus}>Smart stay management</Text>
+            </View>
+            <View style={s.desktopScreen}>
+              <Screen key={tab} {...(user.role === 'Guest' && tab === 0 ? { onPayment: () => setTab(1) } : {})} />
+            </View>
+          </View>
+        </View>
+      ) : (
+        <>
+          <View style={s.top}>
+            <View style={s.brandRow}><Logo size={30} /><Text style={s.brandName}>LockBay</Text></View>
+            <TouchableOpacity onPress={out}><Text style={s.mu}>{user.role}: log out</Text></TouchableOpacity>
+          </View>
+          <Screen key={tab} {...(user.role === 'Guest' && tab === 0 ? { onPayment: () => setTab(1) } : {})} />
+          <View style={s.nav}>
+            {tabs.map(([l], i) => (
+              <TouchableOpacity key={l} style={[s.navI, i === tab && s.navOn]} onPress={() => setTab(i)}>
+                <Text style={[s.navT, i === tab && { color: C.tx, fontWeight: '700' }]}>{l}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </>
+      )}
+    </View>
+  );
+}
+
+const s = StyleSheet.create({
+  photo: { width: '100%', maxWidth: 560, aspectRatio: 1.6, alignSelf: 'flex-start', borderRadius: 8, marginBottom: 10, backgroundColor: '#eee', overflow: 'hidden' },
+  photoPreviewRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 },
+  photoPreview: { width: 88, height: 72, borderRadius: 8, backgroundColor: '#eee' },
+  photoCompact: { maxWidth: '100%', aspectRatio: 1.15, alignSelf: 'stretch', borderRadius: 12, marginBottom: 0 },
+  photoPlaceholder: { backgroundColor: '#f3f2f0' },
+  photoPlaceholderIcon: { fontSize: 34, marginBottom: 5 },
+  photoPlaceholderText: { color: C.mu, fontSize: 11 },
+  photoArrow: { position: 'absolute', top: '50%', marginTop: -18, width: 36, height: 36, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' },
+  photoArrowT: { color: '#fff', fontSize: 24, lineHeight: 28, fontWeight: '700' },
+  photoDots: { position: 'absolute', bottom: 8, left: 0, right: 0, flexDirection: 'row', justifyContent: 'center', gap: 5 },
+  photoDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.55)' },
+  photoDotOn: { backgroundColor: '#fff' },
+  photoEmpty: { alignItems: 'center', justifyContent: 'center' },
+  app: { flex: 1, backgroundColor: '#fff', paddingTop: Platform.OS === 'web' ? 0 : Platform.OS === 'ios' ? 54 : (StatusBar.currentHeight || 24) + 8 },
+  desktopApp: { paddingTop: 0, backgroundColor: C.side },
+  desktopLayout: { flex: 1, flexDirection: 'row' },
+  sidebar: { width: 252, backgroundColor: '#fff', borderRightWidth: 1, borderRightColor: C.line, paddingHorizontal: 22, paddingTop: 28, paddingBottom: 20 },
+  sidebarLabel: { color: C.mu, fontSize: 11, fontWeight: '700', letterSpacing: 1.2, marginTop: 48, marginBottom: 12 },
+  desktopNav: { gap: 5 },
+  desktopNavI: { borderWidth: 1, borderColor: C.line, borderRadius: 10, paddingHorizontal: 13, paddingVertical: 12, backgroundColor: '#fff' },
+  desktopNavOn: { backgroundColor: '#f2f2f2', borderColor: '#222' },
+  desktopNavT: { color: C.mu, fontSize: 14, fontWeight: '500' },
+  desktopNavTOn: { color: C.tx, fontWeight: '700' },
+  sidebarAccount: { marginTop: 'auto', borderTopWidth: 1, borderTopColor: C.line, paddingTop: 18 },
+  sidebarName: { color: C.tx, fontSize: 14, fontWeight: '700', marginBottom: 4 },
+  logoutButton: { marginTop: 12, borderWidth: 1, borderColor: C.line, borderRadius: 8, paddingVertical: 9, alignItems: 'center' },
+  logoutText: { color: C.tx, fontSize: 13, fontWeight: '600' },
+  desktopMain: { flex: 1, minWidth: 0 },
+  desktopHeader: { minHeight: 82, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 36, backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: C.line },
+  desktopEyebrow: { color: C.mu, fontSize: 10, fontWeight: '700', letterSpacing: 1.1, marginBottom: 4 },
+  desktopHeading: { color: C.tx, fontSize: 18, fontWeight: '700' },
+  desktopStatus: { color: C.mu, fontSize: 13 },
+  desktopScreen: { flex: 1 },
+  pageScroll: { flex: 1 },
+  top: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 21, paddingBottom: 6 },
+  brand: { color: C.brand, fontWeight: '700', fontSize: 16 },
+  page: { padding: 21, paddingBottom: 120 },
+  desktopPage: { width: '100%', maxWidth: 1120, alignSelf: 'center', padding: 36, paddingBottom: 48 },
+  h1: { fontSize: 24, fontWeight: '700', color: C.tx, marginBottom: 4 },
+  h2: { fontSize: 15, fontWeight: '600', color: C.tx, marginTop: 18, marginBottom: 10 },
+  sub: { color: C.mu, marginBottom: 16 },
+  mu: { color: C.mu, fontSize: 13 },
+  bold: { fontWeight: '600', fontSize: 15, color: C.tx, flex: 1 },
+  big: { fontSize: 24, fontWeight: '700', color: C.tx },
+  err: { backgroundColor: '#fde8e4', color: '#c2321b', padding: 10, borderRadius: 10, marginBottom: 12, overflow: 'hidden' },
+  empty: { color: C.mu, borderWidth: 1, borderColor: C.line, borderRadius: 12, padding: 18 },
+  card: { borderWidth: 1, borderColor: C.line, borderRadius: 14, padding: 15, marginBottom: 12, gap: 6 },
+  categoryRail: { flexGrow: 0, marginBottom: 18 },
+  categoryTab: { minWidth: 76, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 10, paddingVertical: 8, marginRight: 12, marginBottom: 4, borderWidth: 1, borderColor: C.line, borderRadius: 10, backgroundColor: '#fff' },
+  categoryTabOn: { borderColor: C.tx, backgroundColor: C.side },
+  categoryIcon: { color: C.mu, fontSize: 20, marginBottom: 4 },
+  categoryIconOn: { color: C.tx },
+  categoryLabel: { color: C.mu, fontSize: 12, fontWeight: '600' },
+  categoryLabelOn: { color: C.tx },
+  stayGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 18 },
+  stayTile: { marginBottom: 2, borderWidth: 1, borderColor: C.line, borderRadius: 14, backgroundColor: '#fff', overflow: 'hidden' },
+  tileImageWrap: { position: 'relative' },
+  tileInfo: { padding: 10, gap: 3 },
+  tileTitleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 4 },
+  tileTitle: { flex: 1, color: C.tx, fontSize: 14, fontWeight: '700' },
+  tileStars: { color: C.tx, fontSize: 11, fontWeight: '600' },
+  tileLocation: { color: C.mu, fontSize: 12 },
+  tileAmenityRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 2 },
+  tileAmenity: { color: C.mu, fontSize: 11 },
+  tilePrice: { color: C.tx, fontSize: 14, fontWeight: '700', marginTop: 3 },
+  tilePerNight: { color: C.mu, fontSize: 12, fontWeight: '400' },
+  tileFeatured: { position: 'absolute', top: 8, left: 8, backgroundColor: '#fff', borderRadius: 99, paddingHorizontal: 10, paddingVertical: 4 },
+  tileFeaturedText: { color: C.tx, fontSize: 11, fontWeight: '700' },
+  detailTitle: { flex: 1, color: C.tx, fontSize: 21, fontWeight: '700' },
+  detailLocation: { color: C.mu, fontSize: 14 },
+  bookingDetails: { borderTopWidth: 1, borderTopColor: C.line, paddingTop: 12, marginTop: 6, gap: 5 },
+  estimate: { color: C.tx, fontSize: 15, fontWeight: '700', marginTop: 4 },
+  row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 8 },
+  row2: { flexDirection: 'row', gap: 8, marginTop: 8, flexWrap: 'wrap' },
+  badge: { paddingHorizontal: 12, paddingVertical: 4, borderRadius: 99 },
+  btn: { borderWidth: 1, borderColor: C.line, borderRadius: 8, paddingVertical: 9, paddingHorizontal: 16, alignItems: 'center', backgroundColor: '#fff' },
+  btnP: { backgroundColor: '#222', borderColor: '#222' },
+  btnT: { fontWeight: '600', color: C.tx },
+  input: { borderWidth: 1, borderColor: C.line, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, marginVertical: 5, color: C.tx },
+  stats: { flexDirection: 'row', gap: 8, marginBottom: 14 },
+  stat: { flex: 1, borderWidth: 1, borderColor: C.line, borderRadius: 12, padding: 12 },
+  code: { fontSize: 18, fontWeight: '700', color: C.tx, letterSpacing: 1 },
+  alert: { backgroundColor: '#fde8e4', borderRadius: 12, padding: 14, gap: 10, marginBottom: 14 },
+  paymentBox: { backgroundColor: C.side, borderWidth: 1, borderColor: C.line, borderRadius: 12, padding: 14, gap: 8, marginTop: 8 },
+  paymentNotice: { backgroundColor: '#f7f7f7', borderRadius: 10, padding: 12, gap: 8, marginTop: 8 },
+  paymentNoticeText: { color: C.tx, fontSize: 13 },
+  paymentSafety: { color: '#8a5a00', fontSize: 12 },
+  refundNotice: { color: '#c2321b', fontSize: 13, fontWeight: '600' },
+  nav: { position: 'absolute', left: 21, right: 21, bottom: 22, flexDirection: 'row', backgroundColor: C.side, borderWidth: 1, borderColor: C.line, borderRadius: 16, padding: 6, gap: 4 },
+  navI: { flex: 1, alignItems: 'center', paddingVertical: 10, borderRadius: 10, borderWidth: 1, borderColor: C.line, backgroundColor: '#fff' },
+  navOn: { backgroundColor: '#ececec', borderColor: '#222' },
+  navT: { color: C.mu, fontSize: 14 },
+  bold2: { fontWeight: '600', fontSize: 16, color: C.tx },
+  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'center', padding: 24 },
+  cal: { backgroundColor: '#fff', borderRadius: 16, padding: 18, gap: 8 },
+  calNav: { fontSize: 30, color: C.tx, paddingHorizontal: 14 },
+  calWeek: { flexDirection: 'row' },
+  calHead: { width: '14.28%', textAlign: 'center', color: C.mu, fontSize: 12 },
+  calGrid: { flexDirection: 'row', flexWrap: 'wrap' },
+  calCell: { width: '14.28%', height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 20 },
+  calSel: { backgroundColor: C.brand },
+  calOcc: { backgroundColor: '#fde8e4' },
+  price: { fontSize: 18, fontWeight: '700', color: C.tx },
+  label: { color: C.tx, fontWeight: '600', fontSize: 13, marginTop: 8 },
+  chip: { borderWidth: 1, borderColor: C.line, borderRadius: 99, paddingHorizontal: 14, paddingVertical: 8, marginRight: 8 },
+  chipOn: { backgroundColor: '#222', borderColor: '#222' },
+  chipT: { color: C.tx, fontWeight: '600', fontSize: 13 },
+  landingApp: { backgroundColor: '#f1f0ed' },
+  landingScroll: { flexGrow: 1, width: '100%', maxWidth: 1480, alignSelf: 'center', paddingHorizontal: 24, paddingTop: 22, paddingBottom: 24 },
+  landingScrollMobile: { paddingHorizontal: 14, paddingTop: 14 },
+  landingShell: { backgroundColor: 'transparent' },
+  landingHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#17191c', borderRadius: 14, paddingHorizontal: 22, paddingVertical: 14, marginBottom: 18 },
+  landingHeaderMobile: { flexDirection: 'column', alignItems: 'stretch', gap: 12, paddingHorizontal: 16 },
+  landingBrand: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  landingBrandName: { color: '#fff', fontSize: 20, fontWeight: '800' },
+  landingBrandTag: { color: '#c4c6c8', fontSize: 9, fontWeight: '700', letterSpacing: 1, marginTop: 2 },
+  landingNav: { flexDirection: 'row', gap: 10 },
+  landingNavMobile: { width: '100%', flexWrap: 'wrap' },
+  landingNavButton: { paddingHorizontal: 16, paddingVertical: 10, borderWidth: 1, borderColor: '#55595e', borderRadius: 8 },
+  landingNavButtonMobile: { flexGrow: 1, flexBasis: '45%', alignItems: 'center' },
+  landingNavActive: { backgroundColor: C.brand, borderColor: C.brand },
+  landingNavText: { color: '#fff', fontSize: 13, fontWeight: '700' },
+  landingNavTextActive: { color: '#fff' },
+  landingHero: { position: 'relative', justifyContent: 'center', padding: 22, gap: 24, borderRadius: 20, overflow: 'hidden', backgroundColor: '#20282d' },
+  landingHeroDesktop: { flexDirection: 'row', alignItems: 'center', minHeight: 626, padding: 44, gap: 48 },
+  landingHeroSoloDesktop: { justifyContent: 'flex-start' },
+  landingHeroImage: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, width: '100%', height: '100%' },
+  landingHeroShade: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, backgroundColor: 'rgba(10,18,23,0.62)' },
+  landingStoryPanel: { position: 'relative', zIndex: 1, maxWidth: 570, paddingVertical: 24 },
+  landingStoryPanelDesktop: { flex: 1 },
+  landingEyebrow: { color: '#ffd4df', fontSize: 11, fontWeight: '800', letterSpacing: 1.6 },
+  landingTitle: { color: '#fff', fontSize: 32, fontWeight: '800', lineHeight: 39, marginTop: 12, marginBottom: 10 },
+  landingTitleDesktop: { fontSize: 48, lineHeight: 56 },
+  landingDescription: { color: '#e5e8e9', fontSize: 15, lineHeight: 23, maxWidth: 510 },
+  landingPoints: { marginTop: 24, gap: 12 },
+  landingPoint: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  landingPointNumber: { width: 32, height: 32, borderWidth: 1, borderColor: 'rgba(255,255,255,0.55)', borderRadius: 16, color: '#fff', textAlign: 'center', lineHeight: 30, fontSize: 11, fontWeight: '800' },
+  landingPointText: { color: '#fff', fontSize: 14, fontWeight: '600' },
+  landingIntroActions: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 16, marginTop: 24 },
+  landingIntroActionPrimary: { color: '#fff', fontSize: 14, fontWeight: '800', backgroundColor: C.brand, borderRadius: 8, paddingHorizontal: 16, paddingVertical: 11, overflow: 'hidden' },
+  landingIntroActionSecondary: { color: '#fff', fontSize: 13, fontWeight: '700', textDecorationLine: 'underline' },
+  landingBackLink: { alignSelf: 'flex-start', marginTop: 22, paddingVertical: 8 },
+  landingBackLinkText: { color: '#fff', fontSize: 13, fontWeight: '700', textDecorationLine: 'underline' },
+  landingAuthCard: { position: 'relative', zIndex: 1, width: '100%', maxWidth: 460, alignSelf: 'center', backgroundColor: '#fff', borderColor: '#fff', shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 24, shadowOffset: { width: 0, height: 12 }, elevation: 10 },
+  landingAuthCardMobile: { maxWidth: 460, alignSelf: 'stretch' },
+  landingPhotoCredit: { position: 'absolute', zIndex: 2, bottom: 10, left: 14, flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 5, backgroundColor: 'rgba(20,25,28,0.72)' },
+  landingPhotoCreditText: { color: '#fff', fontSize: 9, fontWeight: '600' },
+  landingPhotoCreditLink: { color: '#fff', fontSize: 9, textDecorationLine: 'underline' },
+  authEyebrow: { color: C.brand, fontSize: 10, fontWeight: '800', letterSpacing: 1.2, marginBottom: 7 },
+  authTitle: { color: C.tx, fontSize: 25, fontWeight: '800' },
+  authDescription: { color: C.mu, fontSize: 13, marginTop: 4, marginBottom: 12 },
+  authModeSwitch: { marginTop: 16, alignItems: 'center' },
+  landingFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 24, marginTop: 14, paddingHorizontal: 18, paddingVertical: 16, backgroundColor: '#fff', borderWidth: 1, borderColor: '#e5e3df', borderRadius: 12 },
+  landingFooterMobile: { flexDirection: 'column', alignItems: 'flex-start', gap: 5 },
+  landingFooterTitle: { color: C.tx, fontSize: 16, fontWeight: '700' },
+  landingFooterText: { color: C.mu, fontSize: 13, textAlign: 'right', maxWidth: 560 },
+  logo: { width: 60, height: 60, borderRadius: 18, backgroundColor: C.brand, alignItems: 'center', justifyContent: 'center', alignSelf: 'center' },
+  door: { width: 22, height: 32, borderRadius: 5, backgroundColor: '#fff', justifyContent: 'center', alignItems: 'flex-end', paddingRight: 4 },
+  knob: { width: 5, height: 5, borderRadius: 3, backgroundColor: C.brand },
+  brandRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  brandName: { fontSize: 18, fontWeight: '800', color: C.tx, letterSpacing: -0.3 },
+  loginCard: { borderWidth: 1, borderColor: C.line, borderRadius: 18, padding: 20 },
+  phoneRow: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: C.line, borderRadius: 8, paddingLeft: 12, marginVertical: 5 },
+  phonePrefix: { color: C.tx, fontWeight: '600' },
+  phoneInput: { flex: 1, marginVertical: 0, borderWidth: 0 },
+  pwRow: { flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: C.line, borderRadius: 8, paddingRight: 12, marginVertical: 5 },
+  link: { color: C.brand, fontWeight: '600', fontSize: 13 },
 });
