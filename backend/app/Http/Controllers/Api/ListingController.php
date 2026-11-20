@@ -132,8 +132,6 @@ class ListingController extends Controller
     public function destroy(Request $r, Listing $listing)
     {
         if (!$this->own($r, $listing)) return $this->fail('Not your listing.');
-        $busy = $listing->bookings()->whereIn('status', ['Pending', 'Flagged', 'Approved'])->where('check_out', '>=', now())->exists();
-        if ($busy) return $this->fail('This listing has active bookings. Pause it instead of deleting it.', 422);
         $uploadedPaths = $listing->uploadedPhotos()->pluck('path')->all();
         $listing->delete();
         Storage::disk('public')->delete($uploadedPaths);
