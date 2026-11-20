@@ -511,6 +511,7 @@ function ListingForm({ l, onSave, onCancel }) {
   const [status, setStatus] = useState(l ? l.status : 'active');
   const [photos, setPhotos] = useState([]);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
   const choosePhotos = async () => {
     try {
       if (Platform.OS !== 'web') {
@@ -534,6 +535,7 @@ function ListingForm({ l, onSave, onCancel }) {
   const save = async () => {
     if (saving) return;
     setSaving(true);
+    setSaveError('');
     try {
       const body = { name, type, location, price: parseInt(price, 10), available_from: from || null, available_to: to || null, status };
       const saved = l ? await call(`/host/listings/${l.id}`, 'PUT', body) : await call('/host/listings', 'POST', body);
@@ -548,7 +550,7 @@ function ListingForm({ l, onSave, onCancel }) {
       }
       onSave();
     } catch (e) {
-      Alert.alert('Could not save listing', e.message);
+      setSaveError(e.message);
     } finally {
       setSaving(false);
     }
@@ -570,6 +572,7 @@ function ListingForm({ l, onSave, onCancel }) {
       <DateField label="Available from (optional)" value={from} onChange={setFrom} clearable />
       <DateField label="Available until (optional)" value={to} min={from || undefined} onChange={setTo} clearable />
       <Text style={s.mu}>Listing photos (up to 8, JPG/PNG/WebP, 5 MB each). Choosing photos replaces the uploaded gallery.</Text>
+      {saveError ? <Text style={s.err}>{`Could not save listing: ${saveError}`}</Text> : null}
       <View style={s.row2}>
         <Btn t="Choose photos" onPress={choosePhotos} />
         {photos.length > 0 && <Btn t={`Clear selection (${photos.length})`} onPress={() => setPhotos([])} />}
@@ -587,7 +590,7 @@ function ListingForm({ l, onSave, onCancel }) {
         <Btn t={status === 'active' ? 'Status: Active (tap to pause)' : 'Status: Paused (tap to activate)'} onPress={() => setStatus(status === 'active' ? 'paused' : 'active')} />
       </View>
       <View style={s.row2}>
-        <Btn p t={saving ? (photos.length ? 'Saving & uploading…' : 'Saving…') : l ? 'Save changes' : 'Add listing'} onPress={save} />
+        <Btn p disabled={saving} t={saving ? (photos.length ? 'Saving & uploading…' : 'Saving…') : l ? 'Save changes' : 'Add listing'} onPress={save} />
         <Btn t="Cancel" onPress={onCancel} />
       </View>
     </Card>
