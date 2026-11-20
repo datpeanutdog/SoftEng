@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { View, Text, TextInput, Linking, TouchableOpacity, ScrollView, RefreshControl, Alert, Platform, StatusBar, ActivityIndicator, Image, Modal, KeyboardAvoidingView, StyleSheet, useWindowDimensions } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { API } from './config'; // your PC's IP lives in config.js, so updates to this file never erase it
-
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const C = { brand: '#e11d5a', line: '#dcdcdc', mu: '#6b6b6b', tx: '#222', side: '#f7f7f7' };
 const LANDMARK_IMAGE = require('./backend/public/images/cdo-gaston-park-city-hall.jpg');
@@ -88,8 +88,8 @@ const Badge = ({ t, k }) => {
   const m = { ok: ['#e3f4e8', '#117a3a'], bad: ['#fde8e4', '#c2321b'], w: ['#fff1d6', '#8a5a00'] }[k] || ['#ececec', '#555'];
   return <View style={[s.badge, { backgroundColor: m[0] }]}><Text style={{ color: m[1], fontSize: 12, fontWeight: '600' }}>{t}</Text></View>;
 };
-const Btn = ({ t, onPress, p }) => (
-  <TouchableOpacity onPress={onPress} style={[s.btn, p && s.btnP]}><Text style={[s.btnT, p && { color: '#fff' }]}>{t}</Text></TouchableOpacity>
+const Btn = ({ t, onPress, p, disabled }) => (
+  <TouchableOpacity disabled={disabled} onPress={onPress} style={[s.btn, p && s.btnP, disabled && { opacity: 0.5 }]}><Text style={[s.btnT, p && { color: '#fff' }]}>{t}</Text></TouchableOpacity>
 );
 const Card = ({ children }) => <View style={s.card}>{children}</View>;
 const Empty = ({ t }) => <Text style={s.empty}>{t}</Text>;
@@ -597,12 +597,39 @@ function HostListings() {
   const h = useLoad('/host/listings');
   const [adding, setAdding] = useState(false);
   const [editId, setEditId] = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
+  const [deleteError, setDeleteError] = useState('');
+  const deleting = useRef(false);
   const done = () => { setAdding(false); setEditId(null); h.silent(); };
+  const remove = async (listing) => {
+    if (deleting.current) return;
+    deleting.current = true;
+    setDeleteError('');
+    setDeletingId(listing.id);
+    try {
+      await call(`/host/listings/${listing.id}`, 'DELETE');
+      await h.silent();
+    } catch (e) {
+      setDeleteError(e.message);
+    } finally {
+      deleting.current = false;
+      setDeletingId(null);
+    }
+  };
+  const confirmDelete = (listing) => {
+    const onConfirm = () => { void remove(listing); };
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      if (window.confirm(`Delete ${listing.name}?`)) onConfirm();
+    } else {
+      ask(`Delete ${listing.name}?`, onConfirm);
+    }
+  };
   const list = h.data ? h.data[0] : [];
   return (
     <Page title="Listings" sub="Add, edit, pause or remove your properties." hook={h}>
       {h.data && <>
         {adding ? <ListingForm onSave={done} onCancel={() => setAdding(false)} /> : <Btn p t="Add listing" onPress={() => { setEditId(null); setAdding(true); }} />}
+        {deleteError ? <Text style={s.err}>{`Could not delete listing: ${deleteError}`}</Text> : null}
         <View style={{ height: 12 }} />
         {list.length ? list.map((l) => editId === l.id ? (
           <ListingForm key={l.id} l={l} onSave={done} onCancel={() => setEditId(null)} />
@@ -614,7 +641,11 @@ function HostListings() {
             <Text style={s.mu}>{peso(l.price)} per night - {l.availability}</Text>
             <View style={s.row2}>
               <Btn t="Edit" onPress={() => { setAdding(false); setEditId(l.id); }} />
-              <Btn t="Delete" onPress={() => ask('Delete ' + l.name + '?', () => run(() => call(`/host/listings/${l.id}`, 'DELETE'), h))} />
+              <Btn
+                t={deletingId === l.id ? 'Deleting...' : 'Delete'}
+                disabled={deletingId !== null}
+                onPress={() => confirmDelete(l)}
+              />
             </View>
           </Card>
         )) : <Empty t="No listings yet. Add your first property to start receiving requests." />}
@@ -760,7 +791,7 @@ function Users() {
 }
 
 // ---------- Login / register + shell ----------
-function Login({ onDone, desktop }) {
+function Login({ onDone, desktop, initialError = '' }) {
   const { width } = useWindowDimensions();
   const compactHeader = Platform.OS !== 'web' || width < 720;
   const [page, setPage] = useState('home');
@@ -771,7 +802,7 @@ function Login({ onDone, desktop }) {
   const [phone, setPhone] = useState('');
   const [pw, setPw] = useState('');
   const [show, setShow] = useState(false);
-  const [err, setErr] = useState('');
+  const [err, setErr] = useState(initialError);
   const [busy, setBusy] = useState(false);
   const go = async () => {
     if (!email.trim() || !pw || (reg && (!name.trim() || !/^9\d{9}$/.test(phone)))) {
@@ -783,7 +814,9 @@ function Login({ onDone, desktop }) {
       const d = reg
         ? await call('/register', 'POST', { name: name.trim(), email: email.trim(), password: pw, phone: `+63${phone}` })
         : await call('/login', 'POST', { email: email.trim(), password: pw });
-      TOKEN = d.token; onDone(d.user);
+      await AsyncStorage.setItem('session', JSON.stringify({ token: d.token, user: d.user }));
+      TOKEN = d.token;
+      onDone(d.user);
     } catch (e) { setErr(e.message); }
     setBusy(false);
   };
@@ -927,13 +960,46 @@ const TABS = {
 
 export default function App() {
   const [user, setUser] = useState(null);
+  const [booting, setBooting] = useState(true);
+  const [sessionError, setSessionError] = useState('');
   const [tab, setTab] = useState(0);
   const { width } = useWindowDimensions();
   const desktop = Platform.OS === 'web' && width >= 960;
-  if (!user) return <Login desktop={desktop} onDone={(u) => { setTab(0); setUser(u); }} />;
+  // Restore the saved login so a refresh or reload does not log the user out.
+  useEffect(() => {
+    (async () => {
+      try {
+        const saved = await AsyncStorage.getItem('session');
+        if (saved) {
+          const session = JSON.parse(saved);
+          if (typeof session.token === 'string' && session.token && session.user && typeof session.user.role === 'string') {
+            TOKEN = session.token;
+            setUser(session.user);
+          } else {
+            await AsyncStorage.removeItem('session');
+          }
+        }
+      } catch (e) {
+        TOKEN = null;
+        setSessionError(`Could not restore the saved login: ${e.message}`);
+      }
+      setBooting(false);
+    })();
+  }, []);
+  if (booting) return <ActivityIndicator style={{ flex: 1 }} color={C.brand} />;
+  if (!user) return <Login desktop={desktop} initialError={sessionError} onDone={(u) => { setTab(0); setUser(u); setSessionError(''); }} />;
   const tabs = TABS[user.role] || TABS.Guest;
   const Screen = tabs[tab][1];
-  const out = async () => { try { await call('/logout', 'POST'); } catch (e) {} TOKEN = null; setUser(null); };
+  const out = async () => {
+    try { await call('/logout', 'POST'); } catch (e) {}
+    TOKEN = null;
+    try {
+      await AsyncStorage.removeItem('session');
+    } catch (e) {
+      setSessionError(`Could not clear the saved login: ${e.message}`);
+    }
+    setUser(null);
+  };
   return (
     <View style={[s.app, desktop && s.desktopApp]}>
       {desktop ? (
